@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">Inkstone Input</string>
+    <string name="ime_name">Inkstone 注音拼音</string>
+    <string name="scanner_title">掃描條碼</string>
+    <string name="scanner_permission_denied">沒有相機權限，請在系統設定中允許 Inkstone Input 使用相機。</string>
+    <string name="home_title">Inkstone Input</string>
+    <string name="home_subtitle">繁體中文拼音鍵盤 · 私人使用</string>
+    <string name="home_enable">前往管理鍵盤</string>
+    <string name="home_choose">選擇目前鍵盤</string>
+    <string name="home_instructions">啟用「Inkstone 注音拼音」後，在任意文字欄位開啟鍵盤選擇器切換輸入法。掃描功能會在首次使用時詢問相機權限。</string>
+</resources>
