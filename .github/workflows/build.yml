@@ -1,0 +1,37 @@
+name: Build APK
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - name: Version
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.${GITHUB_RUN_NUMBER}-dev"; fi
+          echo "name=$V" >> "$GITHUB_OUTPUT"
+      - run: gradle assembleDebug --no-daemon -Pvn=${{ steps.ver.outputs.name }} -Pvc=${{ github.run_number }}
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk weime-${{ steps.ver.outputs.name }}.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: weime-apk
+          path: weime-${{ steps.ver.outputs.name }}.apk
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: weime-${{ steps.ver.outputs.name }}.apk
