@@ -43,7 +43,7 @@ class MainActivity : Activity() {
         dbStatus = TextView(this).apply {
             textSize = 15f
             setPadding(0, 48, 0, 8)
-            text = "商品庫：${ProductDb.count(this@MainActivity)} 筆（xlsx 第一欄＝條碼，第二欄＝商品名）"
+            text = "商品庫：${ProductDb.count(this@MainActivity)} 筆（匯入時自動辨識條碼和名稱欄位）"
         }
         col.addView(dbStatus)
         col.addView(Button(this).apply {
@@ -78,8 +78,10 @@ class MainActivity : Activity() {
         dbStatus.text = "匯入中…"
         Thread {
             try {
-                val n = ProductDb.import(this, uri)
-                runOnUiThread { dbStatus.text = "商品庫：已匯入 $n 筆" }
+                val r = ProductDb.import(this, uri)
+                runOnUiThread {
+                    dbStatus.text = "商品庫：已匯入 ${r.count} 筆\n名稱欄＝${r.nameLabel}；條碼欄＝${r.codeLabels}"
+                }
             } catch (e: Exception) {
                 runOnUiThread { dbStatus.text = "匯入失敗：${e.message}" }
             }

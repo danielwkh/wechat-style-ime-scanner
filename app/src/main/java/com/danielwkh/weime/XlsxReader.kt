@@ -2,37 +2,40 @@ package com.danielwkh.weime
 
 import android.util.Xml
 import org.xmlpull.v1.XmlPullParser
-import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.math.BigDecimal
-import java.util.zip.ZipInputStream
+import java.util.zip.ZipFile
 
-/** 極簡 xlsx 讀取器：只讀第一個工作表，回傳每列的儲存格文字（依欄位位置排列）。 */
+/** 極簡 xlsx 讀取器（串流方式，大檔案也不會爆記憶體）。 */
 object XlsxReader {
-    fun read(input: InputStream): List<List<String>> {
-        var shared: List<String> = emptyList()
-        var sheetBytes: ByteArray? = null
-        var sheetName = ""
-        ZipInputStream(input).use { zip ->
-            while (true) {
-                val e = zip.nextEntry ?: break
-                if (e.name == "xl/sharedStrings.xml") {
-                    shared = parseShared(zip.readBytes())
-                } else if (e.name.startsWith("xl/worksheets/sheet") && e.name.endsWith(".xml")) {
-                    if (sheetBytes == null || e.name < sheetName) {
-                        sheetBytes = zip.readBytes()
-                        sheetName = e.name
-                    }
-                }
-            }
-        }
-        val sb = sheetBytes ?: throw IllegalStateException("不是有效的 xlsx 檔案")
-        return parseSheet(sb, shared)
+    /** 所有工作表的檔名，例如 xl/worksheets/sheet1.xml。 */
+    fun sheetEntries(zip: ZipFile): List<String> =
+        zip.entries().asSequence()
+            .map { it.name }
+            .filter { it.startsWith("xl/worksheets/sheet") && it.endsWith(".xml") }
+            .sortedWith(compareBy<String>({ it.length }, { it }))
+            .toList()
+
+    fun sharedStrings(zip: ZipFile): List<String> {
+        val e = zip.getEntry("xl/sharedStrings.xml") ?: return emptyList()
+        return zip.getInputStream(e).use { parseShared(it) }
     }
 
-    private fun parseShared(b: ByteArray): List<String> {
+    /** 逐列讀取工作表；limit 達到就停止（用來取樣）。每列依欄位位置排列，空格子是空字串。 */
+    fun forEachRow(
+        zip: ZipFile,
+        entry: String,
+        shared: List<String>,
+        limit: Int = Int.MAX_VALUE,
+        onRow: (List<String>) -> Unit
+    ) {
+        val e = zip.getEntry(entry) ?: return
+        zip.getInputStream(e).use { stream -> parseSheet(stream, shared, limit, onRow) }
+    }
+
+    private fun parseShared(input: InputStream): List<String> {
         val p = Xml.newPullParser()
-        p.setInput(ByteArrayInputStream(b), null)
+        p.setInput(input, null)
         val out = ArrayList<String>()
         var sb: StringBuilder? = null
         var inT = false
@@ -57,16 +60,21 @@ object XlsxReader {
         return out
     }
 
-    private fun parseSheet(b: ByteArray, shared: List<String>): List<List<String>> {
+    private fun parseSheet(
+        input: InputStream,
+        shared: List<String>,
+        limit: Int,
+        onRow: (List<String>) -> Unit
+    ) {
         val p = Xml.newPullParser()
-        p.setInput(ByteArrayInputStream(b), null)
-        val rows = ArrayList<List<String>>()
+        p.setInput(input, null)
         var row = ArrayList<String>()
         var col = 0
         var type = ""
         var value = StringBuilder()
         var inV = false
         var inT = false
+        var count = 0
         var ev = p.eventType
         while (ev != XmlPullParser.END_DOCUMENT) {
             when (ev) {
@@ -95,12 +103,15 @@ object XlsxReader {
                         }
                         if (row.size == col) row.add(s) else if (col < row.size) row[col] = s
                     }
-                    "row" -> rows.add(row)
+                    "row" -> {
+                        onRow(row)
+                        count++
+                        if (count >= limit) return
+                    }
                 }
             }
             ev = p.next()
         }
-        return rows
     }
 
     private fun numStr(raw: String): String {
