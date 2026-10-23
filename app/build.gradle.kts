@@ -11,9 +11,11 @@ android {
         minSdk = 26
         targetSdk = 34
         // 由 GitHub Actions 依標籤自動帶入；本機編譯用預設值
-        versionCode = (project.findProperty("vc") as String?)?.toIntOrNull() ?: 5
-        versionName = (project.findProperty("vn") as String?) ?: "1.4"
+        versionCode = (project.findProperty("vc") as String?)?.toIntOrNull() ?: 6
+        versionName = (project.findProperty("vn") as String?) ?: "1.5"
+        ndk { abiFilters.add("arm64-v8a") }
     }
+    packaging { jniLibs { useLegacyPackaging = true } }
     signingConfigs {
         getByName("debug") {
             storeFile = file("debug.keystore")

@@ -26,6 +26,15 @@ jobs:
       - run: gradle assembleDebug --no-daemon -Pvn=${{ steps.ver.outputs.name }} -Pvc=${{ github.run_number }}
       - name: Rename APK
         run: cp app/build/outputs/apk/debug/app-debug.apk weime-${{ steps.ver.outputs.name }}.apk
+      - name: Verify APK
+        run: |
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          APK=weime-${{ steps.ver.outputs.name }}.apk
+          ls -l "$APK"
+          unzip -tq "$APK"
+          "$BT/apksigner" verify --verbose --print-certs "$APK"
+          "$BT/zipalign" -c 4 "$APK" && echo "zipalign OK"
+          "$BT/aapt2" dump badging "$APK" | head -8
       - uses: actions/upload-artifact@v4
         with:
           name: weime-apk
