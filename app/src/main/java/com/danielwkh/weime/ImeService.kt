@@ -18,6 +18,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputConnection
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
@@ -253,11 +254,13 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
     override fun onFinishInputView(finishingInput: Boolean) {
         super.onFinishInputView(finishingInput)
+        handler.removeCallbacks(repeatDel)
         stopScan()
     }
 
     override fun onWindowHidden() {
         super.onWindowHidden()
+        handler.removeCallbacks(repeatDel)
         stopScan()
     }
 
@@ -598,7 +601,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
     }
 
     private fun accept(v: String) {
-        if (scanDone) return
+        if (scanDone || !scanning) return
         scanDone = true
         handler.post { onScanned(v) }
     }
@@ -638,6 +641,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
     /** 掃到後：清除輸入框全部內容 → 貼上（數字或商品名）→ 執行輸入動作（Enter／搜尋／送出）。 */
     private fun onScanned(code: String) {
         stopScan()
+        handler.removeCallbacks(repeatDel)
         var text = code
         if (outName) {
             val name = ProductDb.lookup(this, code)
@@ -648,14 +652,41 @@ class ImeService : InputMethodService(), LifecycleOwner {
                 Toast.LENGTH_LONG
             ).show()
         }
-        val c = ic ?: return
+        if (!replaceAll(text)) return
+        // 等輸入框把新內容處理完，再觸發 Enter／搜尋／送出（只觸發一次）
+        handler.postDelayed({ onEnter() }, 200)
+    }
+
+    /**
+     * 把輸入框的全部內容換成 [text]：一次選取全部再取代，不做大量刪除，
+     * 避免部分 App（WebView、自訂輸入框）因 deleteSurroundingText 數量過大而反覆刪除內容。
+     */
+    private fun replaceAll(text: String): Boolean {
+        val c = ic ?: return false
         c.beginBatchEdit()
-        c.finishComposingText()
-        val before = c.getTextBeforeCursor(100000, 0)?.length ?: 0
-        val after = c.getTextAfterCursor(100000, 0)?.length ?: 0
-        c.deleteSurroundingText(before, after)
-        c.commitText(text, 1)
-        c.endBatchEdit()
-        handler.postDelayed({ onEnter() }, 120)
+        try {
+            c.finishComposingText()
+            var selected = false
+            // 方法 1：用 ExtractedText 取得全文長度，精準選取 0..長度
+            val et = try { c.getExtractedText(ExtractedTextRequest(), 0) } catch (_: Exception) { null }
+            if (et?.text != null) {
+                val len = et.startOffset + et.text.length
+                selected = c.setSelection(0, len)
+            }
+            // 方法 2：用「全選」選單動作
+            if (!selected) selected = c.performContextMenuAction(android.R.id.selectAll)
+            if (selected) {
+                c.commitText(text, 1)          // 取代選取範圍
+            } else {
+                // 方法 3：最後備援，用實際讀到的長度一次刪除
+                val before = c.getTextBeforeCursor(100000, 0)?.length ?: 0
+                val after = c.getTextAfterCursor(100000, 0)?.length ?: 0
+                c.deleteSurroundingText(before, after)
+                c.commitText(text, 1)
+            }
+        } finally {
+            c.endBatchEdit()
+        }
+        return true
     }
 }
