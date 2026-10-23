@@ -11,8 +11,8 @@ android {
         minSdk = 26
         targetSdk = 34
         // 由 GitHub Actions 依標籤自動帶入；本機編譯用預設值
-        versionCode = (project.findProperty("vc") as String?)?.toIntOrNull() ?: 3
-        versionName = (project.findProperty("vn") as String?) ?: "1.2"
+        versionCode = (project.findProperty("vc") as String?)?.toIntOrNull() ?: 4
+        versionName = (project.findProperty("vn") as String?) ?: "1.3"
     }
     signingConfigs {
         getByName("debug") {
@@ -38,4 +38,5 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$camerax")
     implementation("androidx.camera:camera-view:$camerax")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    implementation("com.google.mlkit:text-recognition:16.0.1")
 }

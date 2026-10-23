@@ -36,6 +36,9 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.Text
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.util.concurrent.Executors
 import kotlin.math.abs
 
@@ -140,6 +143,12 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private var camProvider: ProcessCameraProvider? = null
     @Volatile private var scanning = false
     @Volatile private var scanDone = false
+    private val ocr = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    private val ocrSeen = HashMap<String, Int>()
+    private var scanStart = 0L
+    private var lastOcr = 0L
+    private var outName = false          // false＝輸出條碼數字，true＝輸出商品名
+    private lateinit var outBtn: TextView
 
     private val ic: InputConnection? get() = currentInputConnection
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -155,6 +164,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         mode = prefs.getInt("mode", 0)
         lastLetterMode = prefs.getInt("last", 0)
         shift = prefs.getBoolean("shift", false)
+        outName = prefs.getBoolean("outName", false)
         if (mode !in 0..3) mode = 0
         if (lastLetterMode !in 0..1) lastLetterMode = 0
     }
@@ -165,6 +175,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         registry.currentState = Lifecycle.State.DESTROYED
         camExec.shutdown()
         scanner.close()
+        ocr.close()
         super.onDestroy()
     }
 
@@ -190,6 +201,12 @@ class ImeService : InputMethodService(), LifecycleOwner {
             cell("🎤", 18f, "#EDEDED") { startVoice() },
             LinearLayout.LayoutParams(dp(48), dp(38)).apply { setMargins(dp(4), 0, 0, 0) }
         )
+        outBtn = cell(if (outName) "輸出名" else "輸出碼", 13f, "#FFF3C4") {
+            outName = !outName
+            prefs.edit().putBoolean("outName", outName).apply()
+            outBtn.text = if (outName) "輸出名" else "輸出碼"
+        }
+        top.addView(outBtn, LinearLayout.LayoutParams(dp(58), dp(38)).apply { setMargins(dp(4), 0, 0, 0) })
         scanBtn = cell("掃描", 15f, "#07C160", Color.WHITE) { toggleScan() }
         top.addView(scanBtn, LinearLayout.LayoutParams(dp(64), dp(38)).apply { setMargins(dp(4), 0, dp(6), 0) })
 
@@ -325,19 +342,11 @@ class ImeService : InputMethodService(), LifecycleOwner {
         val b = LinearLayout(this)
         if (mode == 2) {
             add(b, cell("ABC", 15f, "#D0D0D0") { mode = lastLetterMode; render(); showCands() }, 1.5f)
-            add(b, cell("123", 15f, "#D0D0D0") { mode = 3; render() }, 1.5f)
         } else {
             add(b, cell("符", 15f, "#D0D0D0") {
                 commitAll()
                 lastLetterMode = mode
                 mode = 2
-                shift = false
-                render()
-            }, 1.2f)
-            add(b, cell("123", 15f, "#D0D0D0") {
-                commitAll()
-                lastLetterMode = mode
-                mode = 3
                 shift = false
                 render()
             }, 1.2f)
@@ -353,6 +362,13 @@ class ImeService : InputMethodService(), LifecycleOwner {
         add(b, cell(comma, 20f, "#FFFFFF") { onPunc(comma) }, 1f)
         add(b, cell("空格", 15f, "#FFFFFF") { onSpace() }, 3f)
         add(b, cell(period, 20f, "#FFFFFF") { onPunc(period) }, 1f)
+        add(b, cell("123", 15f, "#D0D0D0") {
+            commitAll()
+            if (mode < 2) lastLetterMode = mode
+            mode = 3
+            shift = false
+            render()
+        }, 1.2f)
         add(b, cell("⏎", 18f, "#07C160", Color.WHITE) { onEnter() }, 1.5f)
         keyArea.addView(b)
     }
@@ -516,6 +532,11 @@ class ImeService : InputMethodService(), LifecycleOwner {
         scanBtn.text = "關閉"
         scanning = true
         scanDone = false
+        ocrSeen.clear()
+        scanStart = SystemClock.elapsedRealtime()
+        lastOcr = 0L
+        setHint("把條碼對準畫面")
+        if (outName) Thread { ProductDb.count(this) }.start()
         registry.currentState = Lifecycle.State.STARTED
 
         val future = ProcessCameraProvider.getInstance(this)
@@ -543,6 +564,10 @@ class ImeService : InputMethodService(), LifecycleOwner {
         scanBtn.text = "掃描"
     }
 
+    private fun setHint(t: String) {
+        (scanPanel.getChildAt(1) as? TextView)?.text = t
+    }
+
     @SuppressLint("UnsafeOptInUsageError")
     private fun analyze(proxy: ImageProxy) {
         val img = proxy.image
@@ -554,17 +579,75 @@ class ImeService : InputMethodService(), LifecycleOwner {
         scanner.process(input)
             .addOnSuccessListener { list ->
                 val v = list.firstNotNullOfOrNull { it.rawValue }
-                if (v != null && !scanDone) {
-                    scanDone = true
-                    handler.post { onScanned(v) }
+                val now = SystemClock.elapsedRealtime()
+                if (v != null) {
+                    accept(v)
+                    proxy.close()
+                } else if (scanning && !scanDone && now - scanStart > 2000 && now - lastOcr > 350) {
+                    // 條碼掃不到：自動改為辨識條碼附近印的數字
+                    lastOcr = now
+                    setHint("掃不到條碼，正在辨識附近的數字…")
+                    ocr.process(input)
+                        .addOnSuccessListener { t -> handleOcr(t) }
+                        .addOnCompleteListener { proxy.close() }
+                } else {
+                    proxy.close()
                 }
             }
-            .addOnCompleteListener { proxy.close() }
+            .addOnFailureListener { proxy.close() }
     }
 
-    /** 掃到後：清除輸入框全部內容 → 貼上掃描結果 → 執行輸入動作（Enter／搜尋／送出）。 */
-    private fun onScanned(text: String) {
+    private fun accept(v: String) {
+        if (scanDone) return
+        scanDone = true
+        handler.post { onScanned(v) }
+    }
+
+    /** 從辨識到的文字找出 8–14 位的數字：校驗碼正確連續 2 次，或同樣內容連續 4 次才接受。 */
+    private fun handleOcr(t: Text) {
+        if (scanDone || !scanning) return
+        val cands = ArrayList<String>()
+        for (b in t.textBlocks) {
+            cands.add(b.text)
+            for (l in b.lines) cands.add(l.text)
+        }
+        for (c in cands) {
+            val digits = c.filter { it.isDigit() }
+            val junk = c.count { !it.isDigit() && !it.isWhitespace() }
+            if (digits.length !in 8..14 || junk > 1) continue
+            val ok = gs1Ok(digits)
+            val n = (ocrSeen[digits] ?: 0) + 1
+            ocrSeen[digits] = n
+            if ((ok && n >= 2) || n >= 4) {
+                accept(digits)
+                return
+            }
+        }
+    }
+
+    private fun gs1Ok(d: String): Boolean {
+        if (d.length != 8 && d.length != 12 && d.length != 13 && d.length != 14) return false
+        var sum = 0
+        for (i in 0 until d.length - 1) {
+            val v = d[d.length - 2 - i] - '0'
+            sum += if (i % 2 == 0) v * 3 else v
+        }
+        return (10 - sum % 10) % 10 == d.last() - '0'
+    }
+
+    /** 掃到後：清除輸入框全部內容 → 貼上（數字或商品名）→ 執行輸入動作（Enter／搜尋／送出）。 */
+    private fun onScanned(code: String) {
         stopScan()
+        var text = code
+        if (outName) {
+            val name = ProductDb.lookup(this, code)
+            if (name != null) text = name
+            else Toast.makeText(
+                this,
+                if (ProductDb.count(this) == 0) "尚未匯入商品庫，已輸出數字" else "商品庫找不到 $code，已輸出數字",
+                Toast.LENGTH_LONG
+            ).show()
+        }
         val c = ic ?: return
         c.beginBatchEdit()
         c.finishComposingText()

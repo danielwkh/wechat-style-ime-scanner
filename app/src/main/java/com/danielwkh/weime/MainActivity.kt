@@ -14,6 +14,7 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var updateBtn: Button
     private var newer: Updater.Release? = null
+    private lateinit var dbStatus: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -39,6 +40,21 @@ class MainActivity : Activity() {
             text = "授權相機"
             setOnClickListener { startActivity(Intent(this@MainActivity, PermActivity::class.java)) }
         })
+        dbStatus = TextView(this).apply {
+            textSize = 15f
+            setPadding(0, 48, 0, 8)
+            text = "商品庫：${ProductDb.count(this@MainActivity)} 筆（xlsx 第一欄＝條碼，第二欄＝商品名）"
+        }
+        col.addView(dbStatus)
+        col.addView(Button(this).apply {
+            text = "匯入商品庫 (xlsx)"
+            setOnClickListener {
+                startActivityForResult(
+                    Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"),
+                    1001
+                )
+            }
+        })
         status = TextView(this).apply {
             textSize = 16f
             setPadding(0, 64, 0, 16)
@@ -52,6 +68,22 @@ class MainActivity : Activity() {
         col.addView(updateBtn)
         setContentView(col)
         checkUpdate()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != 1001 || resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        dbStatus.text = "匯入中…"
+        Thread {
+            try {
+                val n = ProductDb.import(this, uri)
+                runOnUiThread { dbStatus.text = "商品庫：已匯入 $n 筆" }
+            } catch (e: Exception) {
+                runOnUiThread { dbStatus.text = "匯入失敗：${e.message}" }
+            }
+        }.start()
     }
 
     private fun onUpdateClick() {
