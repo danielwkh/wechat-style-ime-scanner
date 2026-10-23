@@ -11,8 +11,8 @@ android {
         minSdk = 26
         targetSdk = 34
         // 由 GitHub Actions 依標籤自動帶入；本機編譯用預設值
-        versionCode = (project.findProperty("vc") as String?)?.toIntOrNull() ?: 2
-        versionName = (project.findProperty("vn") as String?) ?: "1.1"
+        versionCode = (project.findProperty("vc") as String?)?.toIntOrNull() ?: 3
+        versionName = (project.findProperty("vn") as String?) ?: "1.2"
     }
     signingConfigs {
         getByName("debug") {

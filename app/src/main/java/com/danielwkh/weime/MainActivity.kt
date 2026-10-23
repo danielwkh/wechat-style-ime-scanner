@@ -22,7 +22,7 @@ class MainActivity : Activity() {
             setPadding(48, 96, 48, 48)
         }
         col.addView(TextView(this).apply {
-            text = "1. 按「啟用輸入法」並打開開關\n2. 按「切換輸入法」選擇本輸入法\n3. 鍵盤右上角有 🎤 語音和「掃描」"
+            text = "1. 按「啟用輸入法」並打開開關\n2. 按「切換輸入法」選擇本輸入法\n3. 按「授權相機」一次；之後鍵盤的「掃描」會在鍵盤範圍內開相機，掃到後自動清除輸入框、貼上並按 Enter"
             textSize = 18f
         })
         col.addView(Button(this).apply {
@@ -34,6 +34,10 @@ class MainActivity : Activity() {
             setOnClickListener {
                 (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
             }
+        })
+        col.addView(Button(this).apply {
+            text = "授權相機"
+            setOnClickListener { startActivity(Intent(this@MainActivity, PermActivity::class.java)) }
         })
         status = TextView(this).apply {
             textSize = 16f
