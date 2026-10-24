@@ -3,6 +3,8 @@ package com.danielwkh.weime
 import android.content.Context
 import android.net.Uri
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.zip.ZipFile
 
 /**
@@ -12,7 +14,10 @@ import java.util.zip.ZipFile
 object ProductDb {
     @Volatile private var map: Map<String, String>? = null
 
-    class ImportResult(val count: Int, val codeLabels: String, val nameLabel: String)
+    class ImportResult(
+        val count: Int, val added: Int, val updated: Int, val skipped: Int,
+        val codeLabels: String, val nameLabel: String
+    )
 
     private class Plan(
         val entry: String,
@@ -54,7 +59,18 @@ object ProductDb {
 
     fun count(ctx: Context): Int = get(ctx).size
 
-    fun lookup(ctx: Context, code: String): String? = get(ctx)[norm(code)]
+    /**
+     * 查商品名。依序嘗試：完全相同 → 只留數字 → 掃到的碼多／少一位校驗碼（商品庫是 12 位、掃到 13 位等情形）。
+     */
+    fun lookup(ctx: Context, code: String): String? {
+        val m = get(ctx)
+        val digits = code.filter { it.isDigit() }
+        val k = norm(digits.ifEmpty { code })
+        m[k]?.let { return it }
+        if (k.length > 6) m[norm(k.dropLast(1))]?.let { return it }   // 掃到的有校驗碼、庫裡沒有
+        val kk = k
+        return m.entries.firstOrNull { (key, _) -> key.length > 6 && key.length == kk.length + 1 && key.startsWith(kk) }?.value
+    }
 
     /** 用工作表前幾十列判斷哪些欄是條碼、哪一欄是名稱；找不到就回傳 null。 */
     private fun detect(entry: String, sample: List<List<String>>): Plan? {
@@ -129,7 +145,12 @@ object ProductDb {
                 }
                 val plan = best ?: throw IllegalStateException("找不到商品資料：檔案裡需要有「條碼」和「名稱」類的欄位")
 
-                val m = HashMap<String, String>()
+                // 補全模式：保留原有商品庫，條碼和名稱都相同的略過，沒有的新增，條碼相同但名稱不同的更新名稱
+                val m = HashMap<String, String>(get(ctx))
+                val seen = HashSet<String>()
+                var added = 0
+                var updated = 0
+                var skipped = 0
                 XlsxReader.forEachRow(z, plan.entry, shared) { r ->
                     val name = r.getOrNull(plan.nameCol)?.trim().orEmpty()
                     if (name.isNotEmpty() && isTextual(name)) {
@@ -137,17 +158,30 @@ object ProductDb {
                             val code = r.getOrNull(c)?.trim().orEmpty()
                             if (code.length >= 4 && code.all { it.isDigit() }) {
                                 val k = norm(code)
-                                if (k.isNotEmpty() && !m.containsKey(k)) m[k] = name
+                                if (k.isEmpty() || !seen.add(k)) continue   // 同一檔案內重複的條碼只處理第一次
+                                val old = m[k]
+                                when {
+                                    old == null -> { m[k] = name; added++ }
+                                    old == name -> skipped++
+                                    else -> { m[k] = name; updated++ }
+                                }
                             }
                         }
                     }
                 }
                 if (m.isEmpty()) throw IllegalStateException("找不到有效的條碼資料")
-                file(ctx).bufferedWriter().use { w ->
+                val tmpOut = File(ctx.filesDir, "products.tsv.tmp")
+                tmpOut.bufferedWriter().use { w ->
                     for ((k, v) in m) w.write(k + "\t" + v.replace('\t', ' ').replace('\n', ' ') + "\n")
                 }
+                val target = file(ctx)
+                try {
+                    Files.move(tmpOut.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                    Files.move(tmpOut.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                }
                 map = m
-                ImportResult(m.size, plan.codeLabels, plan.nameLabel)
+                ImportResult(m.size, added, updated, skipped, plan.codeLabels, plan.nameLabel)
             }
         } finally {
             tmp.delete()
