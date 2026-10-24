@@ -4,6 +4,11 @@ on:
     branches: [main]
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      version_name:
+        description: 'Optional app version name (for example 1.6)'
+        required: false
+        default: ''
 permissions:
   contents: write
 jobs:
@@ -20,8 +25,10 @@ jobs:
           gradle-version: 8.9
       - name: Version
         id: ver
+        env:
+          VERSION_NAME: ${{ inputs.version_name }}
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.${GITHUB_RUN_NUMBER}-dev"; fi
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"; elif [[ -n "$VERSION_NAME" ]]; then V="$VERSION_NAME"; else V="0.0.${GITHUB_RUN_NUMBER}-dev"; fi
           echo "name=$V" >> "$GITHUB_OUTPUT"
       - run: gradle assembleDebug --no-daemon -Pvn=${{ steps.ver.outputs.name }} -Pvc=${{ github.run_number }}
       - name: Rename APK
