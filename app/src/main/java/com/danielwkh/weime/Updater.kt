@@ -62,9 +62,10 @@ object Updater {
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.connectTimeout = 15000
         conn.readTimeout = 30000
+        var total = -1L
         try {
             if (conn.responseCode != 200) throw IllegalStateException("下載失敗（${conn.responseCode}）")
-            val total = conn.contentLengthLong
+            total = conn.contentLengthLong
             conn.inputStream.use { input ->
                 out.outputStream().use { o ->
                     val buf = ByteArray(32 * 1024)
