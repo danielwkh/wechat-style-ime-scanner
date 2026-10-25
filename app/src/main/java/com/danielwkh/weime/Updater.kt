@@ -57,6 +57,7 @@ object Updater {
 
     fun download(ctx: Context, url: String, onProgress: (Int) -> Unit): File {
         val dir = File(ctx.cacheDir, "updates").apply { mkdirs() }
+        dir.listFiles()?.forEach { it.delete() }          // 清掉舊的／下載到一半的檔案
         val out = File(dir, "update.apk")
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.connectTimeout = 15000
@@ -80,7 +81,32 @@ object Updater {
         } finally {
             conn.disconnect()
         }
+        verifyApk(ctx, out, total)
         return out
+    }
+
+    /** 安裝前先檢查：長度完整、是 ZIP/APK、系統能解析、套件名稱正確。有問題就直接報錯，不交給系統安裝程式。 */
+    private fun verifyApk(ctx: Context, f: File, expected: Long) {
+        if (expected > 0 && f.length() != expected) {
+            f.delete()
+            throw IllegalStateException("下載不完整（${f.length()}/$expected 位元組），請關閉 VPN 或換網路後重試")
+        }
+        val head = ByteArray(2)
+        f.inputStream().use { it.read(head) }
+        if (head[0] != 'P'.code.toByte() || head[1] != 'K'.code.toByte()) {
+            val preview = f.readText().take(80)
+            f.delete()
+            throw IllegalStateException("下載到的不是 APK（內容：$preview）")
+        }
+        val info = ctx.packageManager.getPackageArchiveInfo(f.absolutePath, 0)
+        if (info == null) {
+            f.delete()
+            throw IllegalStateException("APK 無法解析，檔案可能損毀，請重試")
+        }
+        if (info.packageName != ctx.packageName) {
+            f.delete()
+            throw IllegalStateException("APK 套件名稱不符（${info.packageName}）")
+        }
     }
 
     fun install(ctx: Context, apk: File) {
