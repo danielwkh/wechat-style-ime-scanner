@@ -8,6 +8,7 @@ import android.provider.Settings
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 
 class SettingsActivity : Activity() {
@@ -15,6 +16,9 @@ class SettingsActivity : Activity() {
     private lateinit var updateBtn: Button
     private var newer: Updater.Release? = null
     private lateinit var dbStatus: TextView
+    private lateinit var asrStatus: TextView
+    private lateinit var asrBtn: Button
+    private var asrBusy = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -43,6 +47,31 @@ class SettingsActivity : Activity() {
             }
         })
         col.addView(TextView(this).apply {
+            text = "離線語音輸入（粵語／普通話／英文）"
+            textSize = 20f
+            setPadding(0, 64, 0, 0)
+        })
+        asrStatus = TextView(this).apply {
+            textSize = 15f
+            setPadding(0, 16, 0, 8)
+        }
+        col.addView(asrStatus)
+        asrBtn = Button(this).apply { setOnClickListener { onAsrClick() } }
+        col.addView(asrBtn)
+        col.addView(Button(this).apply {
+            text = "授權麥克風"
+            setOnClickListener {
+                startActivity(Intent(this@SettingsActivity, PermActivity::class.java).putExtra("perm", "mic"))
+            }
+        })
+        col.addView(Button(this).apply {
+            text = "刪除語音模型（釋放空間）"
+            setOnClickListener {
+                if (!asrBusy) { Asr.delete(this@SettingsActivity); refreshAsr() }
+            }
+        })
+        refreshAsr()
+        col.addView(TextView(this).apply {
             text = "版本更新"
             textSize = 20f
             setPadding(0, 64, 0, 0)
@@ -58,7 +87,7 @@ class SettingsActivity : Activity() {
             setOnClickListener { onUpdateClick() }
         }
         col.addView(updateBtn)
-        setContentView(col)
+        setContentView(ScrollView(this).apply { addView(col) })
         checkUpdate()
     }
 
@@ -76,6 +105,40 @@ class SettingsActivity : Activity() {
                 }
             } catch (e: Exception) {
                 runOnUiThread { dbStatus.text = "匯入失敗：${e.message}" }
+            }
+        }.start()
+    }
+
+    private fun refreshAsr() {
+        if (asrBusy) return
+        if (Asr.installed(this)) {
+            asrStatus.text = "語音模型：已安裝（${Asr.sizeMb(this)} MB），完全離線。鍵盤 🎤 → 選「粵語／普通話／自動」說話。"
+            asrBtn.text = "重新下載語音模型"
+        } else {
+            asrStatus.text = "語音模型：尚未下載（約 166MB，建議用 Wi-Fi，下載一次後完全離線）"
+            asrBtn.text = "下載語音模型"
+        }
+        asrBtn.isEnabled = true
+    }
+
+    private fun onAsrClick() {
+        if (asrBusy) {              // 下載中再按＝取消
+            Asr.cancel = true
+            return
+        }
+        asrBusy = true
+        asrBtn.text = "取消下載"
+        asrStatus.text = "下載中… 0%"
+        Thread {
+            try {
+                Asr.download(this) { p -> runOnUiThread { asrStatus.text = "下載並解壓中… $p%" } }
+                runOnUiThread { asrBusy = false; refreshAsr() }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    asrBusy = false
+                    refreshAsr()
+                    asrStatus.text = "下載失敗：${e.message}"
+                }
             }
         }.start()
     }

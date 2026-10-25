@@ -23,6 +23,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.9
+      - name: Fetch sherpa-onnx native libs
+        run: bash scripts/fetch-sherpa.sh
       - name: Version
         id: ver
         env:

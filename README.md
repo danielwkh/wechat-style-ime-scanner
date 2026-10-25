@@ -6,12 +6,17 @@
 - 長按鍵盤任何位置約 0.5 秒後拖動：左右移動游標，上下移動行
 - 頂部工具欄（仿微信）：📋剪貼板、繁／简輸出切換、😀表情符號、🎤語音、⚙設定
 - 剪貼板：複製文字後，3 分鐘內打開鍵盤，工具欄位置會顯示該文字（點一下貼上、∨ 開剪貼板、✕ 關閉）；剪貼板保留最近 30 筆
-- 「設定」內有商品庫匯入（補全模式）和檢查更新
+- 離線語音輸入（sherpa-onnx + SenseVoice）：鍵盤 🎤 開語音面板，可選 自動／粵語／普通話／English，點圓形按鈕開始說話、再點一次或停頓 2 秒結束；辨識結果依「繁／简」設定統一字形。模型不放在 APK 內，在「設定」按一次下載（約 166MB，解開 237MB），之後完全離線
+- 「設定」內有離線語音模型下載、商品庫匯入（補全模式）和檢查更新
 - 「掃描」在鍵盤範圍內開相機：掃到後清除輸入框 → 貼上 → 自動執行 Enter／搜尋／送出（第一次需在 App 內按「授權相機」）
 - 掃不到條碼時，2 秒後自動辨識條碼附近印的數字（優先接受校驗碼正確的 8／12／13／14 位）
 - 商品庫：在 App 內匯入 xlsx，自動辨識條碼欄（可多個，如「第二條碼」）和名稱欄，不需固定欄位；鍵盤頂部「輸出碼／輸出名」切換掃描後貼上數字或商品名
 - APK 只含 arm64 架構（檔案較小）；Actions 編譯後會自動驗證簽名與完整性
 - App 內檢查更新：打開 App 會查 GitHub 最新 Release，可下載並安裝（倉庫需為公開）
-- 發佈新版：`git tag v1.7 && git push origin v1.7`，Actions 會編譯並把 APK 放進 Releases
+- 發佈新版：`git tag v1.8 && git push origin v1.8`，Actions 會編譯並把 APK 放進 Releases
 - 簽名檔 `app/debug.keystore` 固定，所以新版可直接覆蓋安裝
 - 詞庫在 `Dict.kt`，ü 用 v 輸入（nv、lv），可自行擴充
+
+## 編譯
+- 本機編譯前先執行 `bash scripts/fetch-sherpa.sh`（下載 sherpa-onnx arm64 原生函式庫到 `app/src/main/jniLibs/`）；GitHub Actions 已自動執行
+- `app/src/main/java/com/k2fsa/sherpa/onnx/` 是 sherpa-onnx v2.0.0 官方 Kotlin API 原始碼，和原生函式庫版本要一致

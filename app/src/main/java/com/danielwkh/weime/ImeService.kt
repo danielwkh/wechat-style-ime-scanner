@@ -8,6 +8,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.inputmethodservice.InputMethodService
 import android.os.Handler
 import android.text.TextUtils
@@ -46,6 +49,7 @@ import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.util.concurrent.Executors
 import org.json.JSONArray
 import kotlin.math.abs
+import kotlin.math.sqrt
 
 /** 整個鍵盤的容器：長按任何位置後，拖動即可移動游標（左右＝左右，上下＝上下行）。 */
 class KeyboardRoot(
@@ -173,6 +177,12 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private var clipDismissed: String? = null
     private val cm by lazy { getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager }
     private val clipListener = ClipboardManager.OnPrimaryClipChangedListener { onClipChanged() }
+    private val s2t: android.icu.text.Transliterator? by lazy {
+        try { android.icu.text.Transliterator.getInstance("Hans-Hant") }
+        catch (_: Throwable) {
+            try { android.icu.text.Transliterator.getInstance("Simplified-Traditional") } catch (_: Throwable) { null }
+        }
+    }
     private val t2s: android.icu.text.Transliterator? by lazy {
         try { android.icu.text.Transliterator.getInstance("Hant-Hans") }
         catch (_: Throwable) {
@@ -205,6 +215,8 @@ class ImeService : InputMethodService(), LifecycleOwner {
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         try { cm.removePrimaryClipChangedListener(clipListener) } catch (_: Exception) {}
+        stopVoice(true)
+        Thread { Asr.release() }.start()
         camProvider?.unbindAll()
         registry.currentState = Lifecycle.State.DESTROYED
         camExec.shutdown()
@@ -347,6 +359,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         super.onFinishInputView(finishingInput)
         handler.removeCallbacks(repeatDel)
         stopScan()
+        stopVoice(true)
         closePanel()
     }
 
@@ -354,6 +367,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         super.onWindowHidden()
         handler.removeCallbacks(repeatDel)
         stopScan()
+        stopVoice(true)
         closePanel()
     }
 
@@ -607,9 +621,216 @@ class ImeService : InputMethodService(), LifecycleOwner {
         sendDownUpKeyEvents(code)
     }
 
+    // ---------- 離線語音輸入（sherpa-onnx + SenseVoice） ----------
+    @Volatile private var recording = false
+    @Volatile private var discardVoice = false
+    @Volatile private var voiceBusy = false
+    private var voiceStatus: TextView? = null
+    private var voiceBtn: TextView? = null
+    private val asrRelease = Runnable { Thread { Asr.release() }.start() }
+
+    private fun asrLang(): String = prefs.getString("asrLang", "") ?: ""
+
     private fun startVoice() {
         commitAll()
-        startActivity(Intent(this, VoiceActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        if (!Asr.installed(this)) {
+            notify("尚未下載離線語音模型，請按 ⚙ 設定 → 離線語音輸入下載")
+            return
+        }
+        openVoicePanel()
+    }
+
+    private fun stopVoice(discard: Boolean) {
+        discardVoice = discard
+        recording = false
+    }
+
+    private fun setVoice(msg: String) { voiceStatus?.text = msg }
+
+    private fun styleVoiceBtn(rec: Boolean) {
+        voiceBtn?.apply {
+            text = if (rec) "⏹" else "🎤"
+            scaleX = 1f
+            scaleY = 1f
+            (background as? GradientDrawable)?.setColor(Color.parseColor(if (rec) "#E53935" else "#07C160"))
+        }
+    }
+
+    private fun openVoicePanel() {
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val head = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.WHITE)
+        }
+        val langs = listOf("" to "自動", "yue" to "粵語", "zh" to "普通話", "en" to "English")
+        for ((code, label) in langs) {
+            val sel = asrLang() == code
+            head.addView(TextView(this).apply {
+                text = label
+                textSize = 14f
+                gravity = Gravity.CENTER
+                setTextColor(if (sel) Color.WHITE else Color.BLACK)
+                background = roundBg(if (sel) "#07C160" else "#EDEDED")
+                setOnClickListener {
+                    if (!recording && !voiceBusy) {
+                        prefs.edit().putString("asrLang", code).apply()
+                        openVoicePanel()
+                    }
+                }
+            }, lp(0, dp(34), 1f, dp(3)))
+        }
+        head.addView(cell("返回", 13f, "#D0D0D0") { closePanel(); updateTop() }, lp(dp(54), dp(34), 0f, dp(3)))
+        root.addView(head, lp(-1, dp(44)))
+
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        voiceBtn = TextView(this).apply {
+            text = "🎤"
+            textSize = 34f
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#07C160"))
+            }
+            setOnClickListener { toggleRecording() }
+        }
+        voiceStatus = TextView(this).apply {
+            text = "按一下開始說話"
+            textSize = 14f
+            setTextColor(Color.DKGRAY)
+            gravity = Gravity.CENTER
+            setPadding(dp(12), 0, dp(12), 0)
+        }
+        body.addView(voiceBtn, lp(dp(84), dp(84)).apply { topMargin = dp(16) })
+        body.addView(voiceStatus, lp(-1, -2).apply { topMargin = dp(10) })
+        root.addView(body, lp(-1, 0, 1f))
+        openPanel(root)
+    }
+
+    private fun toggleRecording() {
+        if (voiceBusy) return
+        if (recording) recording = false else startRecording()
+    }
+
+    private fun startRecording() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            setVoice("請先授權麥克風，授權後再按一次")
+            startActivity(
+                Intent(this, PermActivity::class.java).putExtra("perm", "mic").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            return
+        }
+        val sr = Asr.SAMPLE_RATE
+        val minBuf = AudioRecord.getMinBufferSize(sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        val ar = try {
+            AudioRecord(
+                MediaRecorder.AudioSource.MIC, sr, AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, sr * 2)
+            )
+        } catch (_: Exception) { null }
+        if (ar == null || ar.state != AudioRecord.STATE_INITIALIZED) {
+            ar?.release()
+            setVoice("無法使用麥克風（可能被其他 App 佔用）")
+            return
+        }
+        handler.removeCallbacks(asrRelease)
+        discardVoice = false
+        recording = true
+        styleVoiceBtn(true)
+        setVoice("說話中…說完再按一下（停頓 2 秒也會自動結束）")
+        Thread {
+            val maxN = sr * 60
+            val samples = FloatArray(maxN)
+            var n = 0
+            val buf = ShortArray(sr / 10)          // 每塊 0.1 秒
+            var noise = 0.0
+            var chunks = 0
+            var speech = false
+            var silent = 0
+            var idle = 0
+            try {
+                ar.startRecording()
+                while (recording && n < maxN) {
+                    val r = ar.read(buf, 0, buf.size)
+                    if (r <= 0) continue
+                    var sum = 0.0
+                    val take = minOf(r, maxN - n)
+                    for (i in 0 until r) {
+                        val v = buf[i].toInt()
+                        sum += v.toDouble() * v
+                        if (i < take) samples[n + i] = v / 32768f
+                    }
+                    n += take
+                    val rms = sqrt(sum / r)
+                    chunks++
+                    if (chunks <= 3) {
+                        noise = maxOf(noise, rms)          // 開頭 0.3 秒當環境噪音
+                    } else {
+                        val thr = maxOf(minOf(noise * 2.5, 1500.0), 400.0)
+                        if (rms > thr) { speech = true; silent = 0; idle = 0 }
+                        else if (speech) { silent++; if (silent >= 20) recording = false }   // 說話後停頓 2 秒
+                        else { idle++; if (idle >= 100) recording = false }                  // 10 秒沒說話
+                    }
+                    val lvl = (rms / 3000.0).coerceIn(0.0, 1.0).toFloat()
+                    handler.post { voiceBtn?.let { it.scaleX = 1f + lvl * 0.25f; it.scaleY = it.scaleX } }
+                }
+            } catch (_: Exception) {
+            } finally {
+                try { ar.stop() } catch (_: Exception) {}
+                ar.release()
+            }
+            recording = false
+            val data = samples.copyOf(n)
+            val heard = speech
+            handler.post { onRecorded(data, heard) }
+        }.start()
+    }
+
+    private fun onRecorded(data: FloatArray, heard: Boolean) {
+        styleVoiceBtn(false)
+        if (discardVoice) return
+        if (!heard || data.size < Asr.SAMPLE_RATE / 3) {
+            setVoice("沒聽到聲音，請再按一下重試")
+            return
+        }
+        voiceBusy = true
+        setVoice("辨識中…（第一次載入模型約需數秒）")
+        val lang = asrLang()
+        Thread {
+            val text = try {
+                Asr.transcribe(this, data, lang)
+            } catch (e: Throwable) {
+                handler.post {
+                    voiceBusy = false
+                    setVoice("辨識失敗：${e.message ?: e.javaClass.simpleName}")
+                }
+                return@Thread
+            }
+            handler.post {
+                voiceBusy = false
+                if (!discardVoice) commitVoice(text)
+                scheduleAsrRelease()
+            }
+        }.start()
+    }
+
+    private fun commitVoice(text: String) {
+        if (text.isBlank()) { setVoice("沒有辨識到內容，請再試一次"); return }
+        // SenseVoice 對普通話多半輸出簡體：依「繁／简」設定統一字形
+        val out = try {
+            if (simplified) t2s?.transliterate(text) ?: text else s2t?.transliterate(text) ?: text
+        } catch (_: Exception) { text }
+        commitAll()
+        ic?.commitText(out, 1)
+        setVoice("已輸入：$out\n（再按一下可繼續說）")
+    }
+
+    /** 閒置 3 分鐘後釋放模型記憶體，下次說話時再載入。 */
+    private fun scheduleAsrRelease() {
+        handler.removeCallbacks(asrRelease)
+        handler.postDelayed(asrRelease, 180000)
     }
 
     // ---------- 頂部工具欄 ----------
@@ -639,6 +860,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
     }
 
     private fun openPanel(content: View) {
+        stopVoice(true)
         stopScan()
         commitAll()
         val h = keyH()
@@ -650,6 +872,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
     }
 
     private fun closePanel() {
+        stopVoice(true)
         if (!::extraPanel.isInitialized || extraPanel.visibility != View.VISIBLE) return
         extraPanel.visibility = View.GONE
         extraPanel.removeAllViews()

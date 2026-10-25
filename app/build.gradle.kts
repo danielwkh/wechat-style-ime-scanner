@@ -11,8 +11,8 @@ android {
         minSdk = 26
         targetSdk = 34
         // 由 GitHub Actions 依標籤自動帶入；本機編譯用預設值
-        versionCode = (project.findProperty("vc") as String?)?.toIntOrNull() ?: 8
-        versionName = (project.findProperty("vn") as String?) ?: "1.7"
+        versionCode = (project.findProperty("vc") as String?)?.toIntOrNull() ?: 9
+        versionName = (project.findProperty("vn") as String?) ?: "1.8"
         ndk { abiFilters.add("arm64-v8a") }
     }
     packaging { jniLibs { useLegacyPackaging = true } }
@@ -41,4 +41,6 @@ dependencies {
     implementation("androidx.camera:camera-view:$camerax")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
     implementation("com.google.mlkit:text-recognition:16.0.1")
+    // 解壓離線語音模型（tar.bz2）
+    implementation("org.apache.commons:commons-compress:1.26.2")
 }
