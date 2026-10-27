@@ -139,6 +139,8 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
     private var mode = 0            // 0 中文拼音, 1 英文, 2 符號, 3 九宮格數字
     private var lastLetterMode = 0
+    private var scheme = 0          // 中文輸入法：0 拼音, 1 速成, 2 倉頡
+    private var cjWarned = false
     private var shift = false
     private val comp = StringBuilder()
     private var cands: List<Pair<String, Int>> = emptyList()
@@ -200,7 +202,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
     /** 每次按鍵都記錄目前使用的鍵盤（中／英／符號／數字、Shift），下次顯示時還原。 */
     private fun saveState() {
-        prefs.edit().putInt("mode", mode).putInt("last", lastLetterMode).putBoolean("shift", shift).apply()
+        prefs.edit().putInt("mode", mode).putInt("last", lastLetterMode).putInt("scheme", scheme).putBoolean("shift", shift).apply()
     }
 
     override fun onCreate() {
@@ -215,6 +217,9 @@ class ImeService : InputMethodService(), LifecycleOwner {
         try { cm.addPrimaryClipChangedListener(clipListener) } catch (_: Exception) {}
         if (mode !in 0..3) mode = 0
         if (lastLetterMode !in 0..1) lastLetterMode = 0
+        scheme = prefs.getInt("scheme", 0)
+        if (scheme !in 0..2) scheme = 0
+        Thread { CjEngine.load(this) }.start()
     }
 
     override fun onDestroy() {
@@ -378,7 +383,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
     }
 
     // ---------- UI ----------
-    private fun cell(t: String, size: Float, bg: String, fg: Int = Color.BLACK, click: () -> Unit): TextView =
+    private fun cell(t: CharSequence, size: Float, bg: String, fg: Int = Color.BLACK, click: () -> Unit): TextView =
         TextView(this).apply {
             text = t
             textSize = size
@@ -492,8 +497,10 @@ class ImeService : InputMethodService(), LifecycleOwner {
                 else add(line, View(this), 1.5f)
             }
             for (ch in r) {
-                val label = if (mode == 1 && shift) ch.uppercase() else ch.toString()
-                add(line, cell(label, 20f, "#FFFFFF") { onChar(ch) }, 1f)
+                val cjKeys = mode == 0 && scheme != 0
+                val label: CharSequence =
+                    if (cjKeys) cjLabel(ch) else if (mode == 1 && shift) ch.uppercase() else ch.toString()
+                add(line, cell(label, if (cjKeys) 16f else 20f, "#FFFFFF") { onChar(ch) }, 1f)
             }
             if (i == 1 && mode != 2) add(line, View(this), 0.5f)
             if (i == 2) add(line, delKey(), 1.5f)   // 刪除鍵固定在第三行最右邊
@@ -511,11 +518,8 @@ class ImeService : InputMethodService(), LifecycleOwner {
                 shift = false
                 render()
             }, 1.2f)
-            add(b, cell(if (mode == 0) "中" else "EN", 15f, "#D0D0D0") {
-                commitAll()
-                mode = 1 - mode
-                shift = false
-                render()
+            add(b, cell(if (mode == 0) arrayOf("拼", "速", "倉")[scheme] else "EN", 15f, "#D0D0D0") {
+                cycleLang()
             }, 1.2f)
         }
         val comma = if (zh) "，" else ","
@@ -596,7 +600,12 @@ class ImeService : InputMethodService(), LifecycleOwner {
     // ---------- 輸入邏輯 ----------
     private fun onChar(c: Char) {
         when (mode) {
-            0 -> { comp.append(c); refresh() }
+            0 -> {
+                // 速成滿 2 碼、倉頡滿 5 碼：先送出第一候選，再開始下一個字
+                if (scheme != 0 && comp.length >= CjEngine.maxLen(scheme)) commitAll()
+                comp.append(c)
+                refresh()
+            }
             1 -> {
                 commit((if (shift) c.uppercaseChar() else c).toString())
                 if (shift) { shift = false; render() }
@@ -605,10 +614,57 @@ class ImeService : InputMethodService(), LifecycleOwner {
         }
     }
 
+    private fun cjActive() = mode == 0 && scheme != 0
+
+    /** 編輯框裡顯示的組字內容：拼音顯示字母，速成／倉頡顯示字根。 */
+    private fun compDisplay(): String = if (cjActive()) CjEngine.display(comp) else comp.toString()
+
     private fun refresh() {
-        ic?.setComposingText(comp.toString(), 1)
-        cands = Dict.lookup(comp.toString())
+        ic?.setComposingText(compDisplay(), 1)
+        var missing = false
+        cands = if (cjActive()) {
+            val r = CjEngine.lookup(this, scheme, comp.toString())
+            missing = r.isEmpty() && comp.isNotEmpty() && !CjEngine.isReady()
+            r
+        } else Dict.lookup(comp.toString())
         showCands()
+        if (missing && !cjWarned) {
+            cjWarned = true
+            notify("尚無速成／倉頡碼表（請安裝由 GitHub Actions 編譯的版本）")
+        }
+    }
+
+    /** 設定裡勾選的中文輸入法（0 拼音、1 速成、2 倉頡）；一個都沒勾就用拼音。 */
+    private fun enabledSchemes(): List<Int> {
+        val bits = prefs.getInt("schemes", 7)
+        val l = (0..2).filter { bits and (1 shl it) != 0 }
+        return if (l.isEmpty()) listOf(0) else l
+    }
+
+    /** 「中」鍵：依序切換已勾選的中文輸入法，最後一個之後切到英文，再按回到第一個。 */
+    private fun cycleLang() {
+        commitAll()
+        val en = enabledSchemes()
+        if (mode == 0) {
+            val idx = en.indexOf(scheme)
+            if (idx in 0 until en.size - 1) scheme = en[idx + 1] else mode = 1
+        } else {
+            mode = 0
+            scheme = en[0]
+        }
+        shift = false
+        render()
+    }
+
+    /** 倉頡／速成的按鍵：上面字根、下面小字母。 */
+    private fun cjLabel(ch: Char): CharSequence {
+        val s = android.text.SpannableString("${CjEngine.radical(ch)}\n${ch.uppercaseChar()}")
+        val center = android.text.Layout.Alignment.ALIGN_CENTER
+        s.setSpan(android.text.style.AlignmentSpan.Standard(center), 0, 2, android.text.Spanned.SPAN_INCLUSIVE_INCLUSIVE)
+        s.setSpan(android.text.style.AlignmentSpan.Standard(center), 2, 3, android.text.Spanned.SPAN_INCLUSIVE_INCLUSIVE)
+        s.setSpan(android.text.style.RelativeSizeSpan(0.55f), 2, 3, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        s.setSpan(android.text.style.ForegroundColorSpan(Color.GRAY), 2, 3, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        return s
     }
 
     private fun pick(c: Pair<String, Int>) {
@@ -624,7 +680,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         while (comp.isNotEmpty()) {
             if (cands.isNotEmpty()) pick(cands[0])
             else {
-                ic?.commitText(comp.toString(), 1)
+                ic?.commitText(compDisplay(), 1)
                 comp.clear()
                 cands = emptyList()
                 showCands()
@@ -649,7 +705,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
     private fun onEnter() {
         if (comp.isNotEmpty()) {
-            ic?.commitText(comp.toString(), 1)
+            ic?.commitText(compDisplay(), 1)
             comp.clear(); cands = emptyList(); showCands()
             return
         }
