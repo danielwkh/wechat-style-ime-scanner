@@ -6,7 +6,10 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Matrix
+import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioFormat
 import android.media.AudioRecord
@@ -61,6 +64,7 @@ class KeyboardRoot(
     private val onEnd: () -> Unit
 ) : LinearLayout(ctx) {
     var suppress = false
+    var onAnyTouch: (() -> Unit)? = null
     private var downX = 0f
     private var downY = 0f
     private var lastX = 0f
@@ -88,6 +92,7 @@ class KeyboardRoot(
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN || ev.actionMasked == MotionEvent.ACTION_POINTER_DOWN) onAnyTouch?.invoke()
         if (longPressed && ev.actionMasked == MotionEvent.ACTION_POINTER_DOWN) return true
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
@@ -234,6 +239,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         ).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#EDEDED"))
+            onAnyTouch = { stopDelRepeat() }
         }
         val top = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
@@ -357,7 +363,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
     override fun onFinishInputView(finishingInput: Boolean) {
         super.onFinishInputView(finishingInput)
-        handler.removeCallbacks(repeatDel)
+        stopDelRepeat()
         stopScan()
         stopVoice(true)
         closePanel()
@@ -365,7 +371,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
     override fun onWindowHidden() {
         super.onWindowHidden()
-        handler.removeCallbacks(repeatDel)
+        stopDelRepeat()
         stopScan()
         stopVoice(true)
         closePanel()
@@ -388,27 +394,72 @@ class ImeService : InputMethodService(), LifecycleOwner {
             }
         }
 
+    private var delHeld = false
+    private var delView: View? = null
+
+    private fun stopDelRepeat() {
+        delHeld = false
+        handler.removeCallbacks(repeatDel)
+        delView?.alpha = 1f
+        delView = null
+    }
+
     private val repeatDel = object : Runnable {
         override fun run() {
-            onBackspace()
+            if (!delHeld) return
+            val v = delView
+            // 手指已不在刪除鍵上、或鍵盤已換畫面／隱藏，就立刻停止
+            if (v == null || !v.isAttachedToWindow || !v.isShown) { stopDelRepeat(); return }
+            if (!deleteStep()) { stopDelRepeat(); return }
             handler.postDelayed(this, 60)
         }
     }
 
-    /** 刪除鍵：按住會連續刪除。 */
+    /** 連續刪除的一步：先確認編輯框真的還有東西可刪，並同步等它處理完，避免事件堆積、放手後還繼續刪。 */
+    private fun deleteStep(): Boolean {
+        if (comp.isNotEmpty()) {
+            comp.deleteCharAt(comp.length - 1)
+            refresh()
+            return true
+        }
+        val c = ic ?: return false
+        if (!c.getSelectedText(0).isNullOrEmpty()) {
+            c.commitText("", 1)
+            return true
+        }
+        val before = c.getTextBeforeCursor(1, 0) ?: run {
+            sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+            return true
+        }
+        if (before.isEmpty()) return false
+        sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+        c.getTextBeforeCursor(1, 0)
+        return true
+    }
+
+    /** 刪除鍵：按住會連續刪除；放手、手指移開、再按任何鍵都會停止。 */
     private fun delKey(): TextView = cell("⌫", 18f, "#D0D0D0") {}.apply {
+        addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {}
+            override fun onViewDetachedFromWindow(v: View) {
+                if (delView === v) stopDelRepeat()
+            }
+        })
         setOnTouchListener { v, e ->
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     kbRoot.suppress = true
+                    stopDelRepeat()
+                    delHeld = true
+                    delView = v
                     v.alpha = 0.6f
                     onBackspace()
                     handler.postDelayed(repeatDel, 400)
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    v.alpha = 1f
-                    handler.removeCallbacks(repeatDel)
+                MotionEvent.ACTION_MOVE -> {
+                    if (e.x < 0 || e.y < 0 || e.x > v.width || e.y > v.height) stopDelRepeat()
                 }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> stopDelRepeat()
             }
             true
         }
@@ -1172,12 +1223,24 @@ class ImeService : InputMethodService(), LifecycleOwner {
                     accept(v)
                     proxy.close()
                 } else if (scanning && !scanDone && now - scanStart > 2000 && now - lastOcr > 350) {
-                    // 條碼掃不到：自動改為辨識條碼附近印的數字
+                    // 條碼掃不到：自動改為辨識「條碼正下方」印的數字
                     lastOcr = now
-                    setHint("掃不到條碼，正在辨識附近的數字…")
-                    ocr.process(input)
-                        .addOnSuccessListener { t -> handleOcr(t) }
-                        .addOnCompleteListener { proxy.close() }
+                    setHint("掃不到條碼，正在辨識條碼下方的數字…")
+                    val bmp = try {
+                        val raw = proxy.toBitmap()
+                        val deg = proxy.imageInfo.rotationDegrees
+                        if (deg == 0) raw
+                        else Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, Matrix().apply { postRotate(deg.toFloat()) }, true)
+                    } catch (e: Exception) {
+                        null
+                    }
+                    if (bmp == null) {
+                        proxy.close()
+                    } else {
+                        ocr.process(InputImage.fromBitmap(bmp, 0))
+                            .addOnSuccessListener { t -> handleOcr(t, bmp) }
+                            .addOnCompleteListener { proxy.close() }
+                    }
                 } else {
                     proxy.close()
                 }
@@ -1191,26 +1254,90 @@ class ImeService : InputMethodService(), LifecycleOwner {
         handler.post { onScanned(v) }
     }
 
-    /** 從辨識到的文字找出 8–14 位的數字：校驗碼正確連續 2 次，或同樣內容連續 4 次才接受。 */
-    private fun handleOcr(t: Text) {
+    /**
+     * 只接受「正上方有條碼」的數字行：
+     * 1) 找出整行幾乎都是數字的文字行（同一水平帶的數字會合併，EAN-13 常被拆成 3 段）；
+     * 2) 檢查該行正上方是不是一排垂直條紋（條碼）；
+     * 3) 8–14 位，校驗碼正確連續 2 次，或同樣內容連續 3 次才接受。
+     */
+    private fun handleOcr(t: Text, bmp: Bitmap) {
         if (scanDone || !scanning) return
-        val cands = ArrayList<String>()
-        for (b in t.textBlocks) {
-            cands.add(b.text)
-            for (l in b.lines) cands.add(l.text)
+        class DL(val text: String, val r: Rect)
+
+        val lines = ArrayList<DL>()
+        for (b in t.textBlocks) for (l in b.lines) {
+            val r = l.boundingBox ?: continue
+            val digits = l.text.filter { it.isDigit() }
+            val junk = l.text.count { !it.isDigit() && !it.isWhitespace() }
+            if (digits.isNotEmpty() && junk <= 1) lines.add(DL(digits, r))
         }
+        if (lines.isEmpty()) return
+
+        val cands = ArrayList<DL>(lines)
+        // 合併同一水平帶、由左到右的數字段
+        val sorted = lines.sortedBy { it.r.centerY() }
+        val used = BooleanArray(sorted.size)
+        for (i in sorted.indices) {
+            if (used[i]) continue
+            val band = ArrayList<DL>()
+            band.add(sorted[i])
+            for (j in i + 1 until sorted.size) {
+                if (!used[j] && abs(sorted[j].r.centerY() - sorted[i].r.centerY()) <= sorted[i].r.height() * 0.6) {
+                    band.add(sorted[j]); used[j] = true
+                }
+            }
+            if (band.size > 1) {
+                val ordered = band.sortedBy { it.r.left }
+                val u = Rect(ordered[0].r)
+                for (d in ordered) u.union(d.r)
+                cands.add(DL(ordered.joinToString("") { it.text }, u))
+            }
+        }
+
         for (c in cands) {
-            val digits = c.filter { it.isDigit() }
-            val junk = c.count { !it.isDigit() && !it.isWhitespace() }
-            if (digits.length !in 8..14 || junk > 1) continue
-            val ok = gs1Ok(digits)
-            val n = (ocrSeen[digits] ?: 0) + 1
-            ocrSeen[digits] = n
-            if ((ok && n >= 2) || n >= 4) {
-                accept(digits)
+            if (c.text.length !in 8..14) continue
+            if (!barcodeAbove(bmp, c.r)) continue
+            val ok = gs1Ok(c.text)
+            val n = (ocrSeen[c.text] ?: 0) + 1
+            ocrSeen[c.text] = n
+            if ((ok && n >= 2) || n >= 3) {
+                accept(c.text)
                 return
             }
         }
+    }
+
+    /** 數字行正上方是不是條碼：該區域「左右方向的明暗變化」遠大於「上下方向」，且對比夠強。 */
+    private fun barcodeAbove(bmp: Bitmap, r: Rect): Boolean {
+        val lh = maxOf(r.height(), 8)
+        val x0 = (r.left + r.width() * 0.08f).toInt().coerceIn(0, bmp.width - 2)
+        val x1 = (r.right - r.width() * 0.08f).toInt().coerceIn(x0 + 2, bmp.width)
+        val y1 = (r.top - lh * 0.2f).toInt().coerceAtMost(bmp.height)
+        val y0 = (r.top - lh * 3.0f).toInt().coerceAtLeast(0)
+        val w = x1 - x0
+        val h = y1 - y0
+        if (w < 16 || h < lh) return false
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, x0, y0, w, h)
+        val lum = IntArray(w * h)
+        for (i in px.indices) {
+            val c = px[i]
+            lum[i] = (((c shr 16) and 255) * 299 + ((c shr 8) and 255) * 587 + (c and 255) * 114) / 1000
+        }
+        var gx = 0L
+        var gy = 0L
+        for (y in 0 until h - 1) {
+            val row = y * w
+            for (x in 0 until w - 1) {
+                val i = row + x
+                gx += abs(lum[i + 1] - lum[i])
+                gy += abs(lum[i + w] - lum[i])
+            }
+        }
+        val n = ((w - 1) * (h - 1)).toDouble()
+        val mx = gx / n
+        val my = gy / n
+        return mx >= 10.0 && mx >= my * 3.0
     }
 
     private fun gs1Ok(d: String): Boolean {
@@ -1241,7 +1368,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
     /** 掃到後：清除輸入框全部內容 → 貼上（數字或商品名）→ 執行輸入動作（Enter／搜尋／送出）。 */
     private fun onScanned(code: String) {
         stopScan()
-        handler.removeCallbacks(repeatDel)
+        stopDelRepeat()
         var text = code
         if (outName) {
             val name = ProductDb.lookup(this, code)

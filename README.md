@@ -20,3 +20,5 @@
 ## 編譯
 - 本機編譯前先執行 `bash scripts/fetch-sherpa.sh`（下載 sherpa-onnx arm64 原生函式庫到 `app/src/main/jniLibs/`）；GitHub Actions 已自動執行
 - `app/src/main/java/com/k2fsa/sherpa/onnx/` 是 sherpa-onnx v2.0.0 官方 Kotlin API 原始碼，和原生函式庫版本要一致
+- 長按刪除鍵：放手、手指移開、再按任何鍵都會立即停止；連續刪除會先確認輸入框還有內容
+- 掃不到條碼時的數字辨識：只接受「正上方有條碼」的數字行（8-14 位）
