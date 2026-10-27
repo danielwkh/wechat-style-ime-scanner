@@ -14,18 +14,26 @@ object Dict {
     fun lookup(p: String): List<Pair<String, Int>> {
         if (p.isEmpty()) return emptyList()
         val out = LinkedHashSet<Pair<String, Int>>()
-        map[p]?.forEach { out.add(it to p.length) }
+        map[p]?.sortedByDescending { CjEngine.freqOf(it) }?.forEach { out.add(it to p.length) }
         map.keys.filter { it.length > p.length && it.startsWith(p) }
             .sortedBy { it.length }
             .take(15)
-            .forEach { k -> map[k]!!.take(3).forEach { out.add(it to p.length) } }
+            .forEach { k ->
+                map[k]!!.sortedByDescending { CjEngine.freqOf(it) }.take(3).forEach { out.add(it to p.length) }
+            }
         if (out.isEmpty()) {
             for (n in p.length - 1 downTo 1) {
                 val c = map[p.substring(0, n)]
-                if (c != null) { c.forEach { out.add(it to n) }; break }
+                if (c != null) {
+                    c.sortedByDescending { CjEngine.freqOf(it) }.forEach { out.add(it to n) }
+                    break
+                }
             }
         }
-        return out.take(40)
+        if (!CjEngine.hasFreq()) return out.take(40)
+        // 常用字優先：有字頻（或是詞組）的排前面，沒有字頻的罕見字排後面
+        val (common, rare) = out.toList().partition { it.first.length > 1 || CjEngine.freqOf(it.first) > 0L }
+        return (common + rare).take(40)
     }
 
     private const val RAW = """

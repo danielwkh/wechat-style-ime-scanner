@@ -28,26 +28,26 @@ class SettingsActivity : Activity() {
             setPadding(48, 96, 48, 48)
         }
         col.addView(TextView(this).apply {
-            text = "中文輸入法（鍵盤的「拼／速／倉」鍵依序切換已勾選的）"
+            text = "中文輸入法（鍵盤的「拼／速／倉／筆」鍵依序切換已勾選的）"
             textSize = 20f
         })
         val kbPrefs = getSharedPreferences("kb", MODE_PRIVATE)
-        val schemeNames = listOf("拼音", "速成", "倉頡（五代）")
-        val schemeBits = kbPrefs.getInt("schemes", 7)
-        for (i in 0..2) {
+        val schemeNames = listOf("拼音", "速成", "倉頡（五代）", "筆劃（橫豎撇點折）")
+        val schemeBits = kbPrefs.getInt("schemes2", kbPrefs.getInt("schemes", 7) or 8)
+        for (i in 0..3) {
             col.addView(android.widget.CheckBox(this).apply {
                 text = schemeNames[i]
                 isChecked = schemeBits and (1 shl i) != 0
                 setOnCheckedChangeListener { _, on ->
-                    val cur = kbPrefs.getInt("schemes", 7)
+                    val cur = kbPrefs.getInt("schemes2", kbPrefs.getInt("schemes", 7) or 8)
                     kbPrefs.edit()
-                        .putInt("schemes", if (on) cur or (1 shl i) else cur and (1 shl i).inv())
+                        .putInt("schemes2", if (on) cur or (1 shl i) else cur and (1 shl i).inv())
                         .apply()
                 }
             })
         }
         col.addView(TextView(this).apply {
-            text = "速成／倉頡的碼表來自 Rime（rime-cangjie、rime-essay，LGPL），編譯時自動下載。"
+            text = "速成／倉頡／筆劃的碼表來自 Rime（rime-cangjie、rime-stroke、rime-essay，LGPL），編譯時自動下載。"
             textSize = 13f
             setPadding(0, 8, 0, 48)
         })

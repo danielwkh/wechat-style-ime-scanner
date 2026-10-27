@@ -101,7 +101,7 @@ class KeyboardRoot(
                 lastX = ev.x; lastY = ev.y
                 longPressed = false
                 removeCallbacks(longRun)
-                postDelayed(longRun, 500)
+                postDelayed(longRun, 350)
             }
             MotionEvent.ACTION_MOVE -> {
                 if (longPressed) {
@@ -218,7 +218,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         if (mode !in 0..3) mode = 0
         if (lastLetterMode !in 0..1) lastLetterMode = 0
         scheme = prefs.getInt("scheme", 0)
-        if (scheme !in 0..2) scheme = 0
+        if (scheme !in 0..3) scheme = 0
         Thread { CjEngine.load(this) }.start()
     }
 
@@ -237,8 +237,8 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
     override fun onCreateInputView(): View {
         kbRoot = KeyboardRoot(
-            this, dp(16), dp(34),
-            onStart = { commitAll(); keyArea.alpha = 0.35f },
+            this, dp(9), dp(30),
+            onStart = { cursorStart() },
             onMove = { dx, dy -> moveCursor(dx, dy) },
             onEnd = { keyArea.alpha = 1f }
         ).apply {
@@ -482,7 +482,9 @@ class ImeService : InputMethodService(), LifecycleOwner {
             keyArea.addView(numPage())
             return
         }
-        val rows = if (mode == 2) listOf("1234567890", "@#\$%&*-+=/", "()「」_~…")
+        val strokeMode = mode == 0 && scheme == 3
+        val rows = if (strokeMode) emptyList<String>()
+        else if (mode == 2) listOf("1234567890", "@#\$%&*-+=/", "()「」_~…")
         else listOf("qwertyuiop", "asdfghjkl", "zxcvbnm")
         val zh = if (mode >= 2) lastLetterMode == 0 else mode == 0
 
@@ -507,6 +509,8 @@ class ImeService : InputMethodService(), LifecycleOwner {
             keyArea.addView(line)
         }
 
+        if (strokeMode) keyArea.addView(strokePage())
+
         val b = LinearLayout(this)
         if (mode == 2) {
             add(b, cell("ABC", 15f, "#D0D0D0") { mode = lastLetterMode; render(); showCands() }, 1.5f)
@@ -518,7 +522,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
                 shift = false
                 render()
             }, 1.2f)
-            add(b, cell(if (mode == 0) arrayOf("拼", "速", "倉")[scheme] else "EN", 15f, "#D0D0D0") {
+            add(b, cell(if (mode == 0) arrayOf("拼", "速", "倉", "筆")[scheme] else "EN", 15f, "#D0D0D0") {
                 cycleLang()
             }, 1.2f)
         }
@@ -617,27 +621,27 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private fun cjActive() = mode == 0 && scheme != 0
 
     /** 編輯框裡顯示的組字內容：拼音顯示字母，速成／倉頡顯示字根。 */
-    private fun compDisplay(): String = if (cjActive()) CjEngine.display(comp) else comp.toString()
+    private fun compDisplay(): String = if (cjActive()) CjEngine.display(scheme, comp) else comp.toString()
 
     private fun refresh() {
         ic?.setComposingText(compDisplay(), 1)
         var missing = false
         cands = if (cjActive()) {
             val r = CjEngine.lookup(this, scheme, comp.toString())
-            missing = r.isEmpty() && comp.isNotEmpty() && !CjEngine.isReady()
+            missing = r.isEmpty() && comp.isNotEmpty() && !CjEngine.isReady(scheme)
             r
         } else Dict.lookup(comp.toString())
         showCands()
         if (missing && !cjWarned) {
             cjWarned = true
-            notify("尚無速成／倉頡碼表（請安裝由 GitHub Actions 編譯的版本）")
+            notify("尚無此輸入法的碼表（請安裝由 GitHub Actions 編譯的版本）")
         }
     }
 
-    /** 設定裡勾選的中文輸入法（0 拼音、1 速成、2 倉頡）；一個都沒勾就用拼音。 */
+    /** 設定裡勾選的中文輸入法（0 拼音、1 速成、2 倉頡、3 筆劃）；一個都沒勾就用拼音。 */
     private fun enabledSchemes(): List<Int> {
-        val bits = prefs.getInt("schemes", 7)
-        val l = (0..2).filter { bits and (1 shl it) != 0 }
+        val bits = prefs.getInt("schemes2", prefs.getInt("schemes", 7) or 8)
+        val l = (0..3).filter { bits and (1 shl it) != 0 }
         return if (l.isEmpty()) listOf(0) else l
     }
 
@@ -654,6 +658,42 @@ class ImeService : InputMethodService(), LifecycleOwner {
         }
         shift = false
         render()
+    }
+
+    /** 筆劃鍵盤：橫、豎、撇、點、折五個筆劃鍵 + 清除 + 常用標點；刪除鍵在右邊。 */
+    private fun strokePage(): View {
+        val h = dp(54) * 3
+        val wrap = LinearLayout(this)
+        fun key(row: LinearLayout, label: String, bg: String, size: Float, click: () -> Unit) {
+            row.addView(
+                cell(label, size, bg, Color.BLACK, click),
+                LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) }
+            )
+        }
+        val r1 = LinearLayout(this)
+        val r2 = LinearLayout(this)
+        val r3 = LinearLayout(this)
+        key(r1, "一", "#FFFFFF", 26f) { onChar('h') }
+        key(r1, "丨", "#FFFFFF", 26f) { onChar('s') }
+        key(r1, "丿", "#FFFFFF", 26f) { onChar('p') }
+        key(r2, "丶", "#FFFFFF", 26f) { onChar('n') }
+        key(r2, "乙", "#FFFFFF", 26f) { onChar('z') }
+        key(r2, "清除", "#D0D0D0", 15f) { clearComp() }
+        for (s in listOf("，", "。", "？", "！", "、")) key(r3, s, "#FFFFFF", 20f) { onPunc(s) }
+        val grid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        for (r in listOf(r1, r2, r3)) grid.addView(r, LinearLayout.LayoutParams(-1, 0, 1f))
+        val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        right.addView(delKey(), LinearLayout.LayoutParams(-1, -1).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) })
+        wrap.addView(grid, LinearLayout.LayoutParams(0, h, 4.2f))
+        wrap.addView(right, LinearLayout.LayoutParams(0, h, 1.2f))
+        return wrap
+    }
+
+    private fun clearComp() {
+        comp.setLength(0)
+        cands = emptyList()
+        ic?.setComposingText("", 1)
+        showCands()
     }
 
     /** 倉頡／速成的按鍵：上面字根、下面小字母。 */
@@ -718,14 +758,55 @@ class ImeService : InputMethodService(), LifecycleOwner {
         } else sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
     }
 
-    private fun moveCursor(dx: Int, dy: Int) {
-        val code = when {
-            dx > 0 -> KeyEvent.KEYCODE_DPAD_RIGHT
-            dx < 0 -> KeyEvent.KEYCODE_DPAD_LEFT
-            dy > 0 -> KeyEvent.KEYCODE_DPAD_DOWN
-            else -> KeyEvent.KEYCODE_DPAD_UP
+    // ---- 長按後不放手、拖動即可即時移動游標 ----
+    private var curPos = -1          // 目前游標位置（-1＝這個編輯框讀不到，改用方向鍵）
+    private var curMax = 0
+    private var curVerified = false
+
+    private fun cursorStart() {
+        commitAll()
+        keyArea.alpha = 0.35f
+        curVerified = false
+        val c = ic
+        if (c == null) {
+            curPos = -1
+            return
         }
-        sendDownUpKeyEvents(code)
+        val b = c.getTextBeforeCursor(100000, 0)
+        val a = c.getTextAfterCursor(100000, 0)
+        if (b != null && a != null) {
+            curPos = b.length
+            curMax = b.length + a.length
+        } else {
+            curPos = -1
+        }
+    }
+
+    private fun moveCursor(dx: Int, dy: Int) {
+        val c = ic ?: return
+        if (dx != 0) {
+            val key = if (dx > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
+            if (curPos < 0) {
+                sendDownUpKeyEvents(key)
+                return
+            }
+            val np = (curPos + dx).coerceIn(0, curMax)
+            if (np == curPos) return
+            curPos = np
+            c.setSelection(np, np)
+            if (!curVerified) {
+                curVerified = true
+                val real = c.getTextBeforeCursor(100000, 0)?.length
+                if (real != np) {
+                    // 這個編輯框不接受直接設定游標位置，改用方向鍵
+                    curPos = -1
+                    sendDownUpKeyEvents(key)
+                }
+            }
+            return
+        }
+        sendDownUpKeyEvents(if (dy > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP)
+        if (curPos >= 0) c.getTextBeforeCursor(100000, 0)?.let { curPos = it.length }
     }
 
     // ---------- 離線語音輸入（sherpa-onnx + SenseVoice） ----------
