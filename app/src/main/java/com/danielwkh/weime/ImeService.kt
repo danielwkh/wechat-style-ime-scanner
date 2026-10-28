@@ -243,21 +243,29 @@ class ImeService : InputMethodService(), LifecycleOwner {
             onEnd = { keyArea.alpha = 1f }
         ).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#EDEDED"))
+            setBackgroundColor(Color.parseColor("#202124"))
             onAnyTouch = { stopDelRepeat() }
         }
         val top = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(Color.parseColor("#202124"))
         }
         midFrame = FrameLayout(this)
 
         // 工具欄：剪貼板、簡繁、表情、語音、設定
         toolbar = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
-        val tools = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        val tools = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.parseColor("#202124"))
+        }
         fun tool(label: String, size: Float, click: () -> Unit): TextView {
-            val t = cell(label, size, "#EDEDED", click = click)
-            tools.addView(t, LinearLayout.LayoutParams(dp(38), dp(38)).apply { setMargins(dp(3), 0, dp(2), 0) })
+            val t = cell(label, size, "#303134", Color.LTGRAY, click).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.parseColor("#303134"))
+                }
+            }
+            tools.addView(t, LinearLayout.LayoutParams(dp(38), dp(38)).apply { setMargins(dp(5), 0, dp(5), 0) })
             return t
         }
         tool("📋", 17f) { openClipPanel() }
@@ -281,10 +289,10 @@ class ImeService : InputMethodService(), LifecycleOwner {
             visibility = View.GONE
             setPadding(dp(10), 0, 0, 0)
         }
-        clipChip.addView(TextView(this).apply { text = "📋"; textSize = 17f; gravity = Gravity.CENTER })
+        clipChip.addView(TextView(this).apply { text = "📋"; textSize = 17f; gravity = Gravity.CENTER; setTextColor(Color.LTGRAY) })
         clipChipText = TextView(this).apply {
             textSize = 17f
-            setTextColor(Color.BLACK)
+            setTextColor(Color.WHITE)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
             gravity = Gravity.CENTER_VERTICAL
@@ -318,6 +326,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         keyArea = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(3), dp(3), dp(3), dp(6))
+            setBackgroundColor(Color.parseColor("#202124"))
         }
 
         // 掃描面板：和鍵盤同樣大小，直接在鍵盤範圍內顯示相機畫面
@@ -340,7 +349,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         kbRoot.addView(scanPanel, LinearLayout.LayoutParams(-1, dp(228)))
         extraPanel = NoDragFrame(this).apply {
             visibility = View.GONE
-            setBackgroundColor(Color.parseColor("#EDEDED"))
+            setBackgroundColor(Color.parseColor("#202124"))
         }
         kbRoot.addView(extraPanel, LinearLayout.LayoutParams(-1, dp(228)))
         render()
@@ -387,10 +396,15 @@ class ImeService : InputMethodService(), LifecycleOwner {
         TextView(this).apply {
             text = t
             textSize = size
-            setTextColor(fg)
+            val darkBg = when (bg.uppercase()) {
+                "#FFFFFF" -> "#4A4A4A"
+                "#D0D0D0", "#EDEDED", "#FFF3C4" -> "#343638"
+                else -> bg
+            }
+            setTextColor(if (fg == Color.BLACK) Color.WHITE else if (fg == Color.GRAY) Color.LTGRAY else fg)
             gravity = Gravity.CENTER
             background = GradientDrawable().apply {
-                setColor(Color.parseColor(bg))
+                setColor(Color.parseColor(darkBg))
                 cornerRadius = dp(6).toFloat()
             }
             setOnClickListener {
@@ -470,10 +484,43 @@ class ImeService : InputMethodService(), LifecycleOwner {
         }
     }
 
-    private fun add(row: LinearLayout, v: View, w: Float) {
-        row.addView(v, LinearLayout.LayoutParams(0, dp(48), w).apply {
+    private fun add(row: LinearLayout, v: View, w: Float, h: Int = dp(50)) {
+        row.addView(v, LinearLayout.LayoutParams(0, h, w).apply {
             setMargins(dp(3), dp(3), dp(3), dp(3))
         })
+    }
+
+    private fun alphaLabel(ch: Char, row: Int): CharSequence {
+        val top = when (row) {
+            0 -> "1234567890".getOrNull("qwertyuiop".indexOf(ch.lowercaseChar()))?.toString().orEmpty()
+            1 -> "-/:;()\$&@".getOrNull("asdfghjkl".indexOf(ch.lowercaseChar()))?.toString().orEmpty()
+            else -> ""
+        }
+        if (top.isEmpty()) return if (shift && mode == 1) ch.uppercaseChar().toString() else ch.toString()
+        val s = android.text.SpannableString("$top\n${if (shift && mode == 1) ch.uppercaseChar() else ch}")
+        s.setSpan(android.text.style.RelativeSizeSpan(0.55f), 0, top.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        s.setSpan(android.text.style.ForegroundColorSpan(Color.LTGRAY), 0, top.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        return s
+    }
+
+    /** 短按輸入空格；長按直接打開離線語音並開始錄音。 */
+    private fun spaceKey(label: String, shortAction: () -> Unit = { onSpace() }): View {
+        val v = cell(label, 16f, "#4A4A4A", Color.WHITE, shortAction)
+        v.setOnTouchListener { _, e ->
+            if (e.actionMasked == MotionEvent.ACTION_DOWN) kbRoot.suppress = true
+            false
+        }
+        v.setOnLongClickListener {
+            kbRoot.suppress = true
+            startVoice()
+            handler.postDelayed({
+                if (::extraPanel.isInitialized && extraPanel.visibility == View.VISIBLE && voiceBtn != null && !recording && !voiceBusy) {
+                    startRecording()
+                }
+            }, 120)
+            true
+        }
+        return v
     }
 
     private fun render() {
@@ -483,8 +530,12 @@ class ImeService : InputMethodService(), LifecycleOwner {
             return
         }
         val strokeMode = mode == 0 && scheme == 3
-        val rows = if (strokeMode) emptyList<String>()
-        else if (mode == 2) listOf("1234567890", "@#\$%&*-+=/", "()「」_~…")
+        if (strokeMode) {
+            keyArea.addView(strokePage())
+            keyArea.addView(strokeBottomRow())
+            return
+        }
+        val rows = if (mode == 2) listOf("1234567890", "@#\$%&*-+=/", "()「」_~…")
         else listOf("qwertyuiop", "asdfghjkl", "zxcvbnm")
         val zh = if (mode >= 2) lastLetterMode == 0 else mode == 0
 
@@ -501,7 +552,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
             for (ch in r) {
                 val cjKeys = mode == 0 && scheme != 0
                 val label: CharSequence =
-                    if (cjKeys) cjLabel(ch) else if (mode == 1 && shift) ch.uppercase() else ch.toString()
+                    if (cjKeys) cjLabel(ch) else if (mode != 2) alphaLabel(ch, i) else ch.toString()
                 add(line, cell(label, if (cjKeys) 16f else 20f, "#FFFFFF") { onChar(ch) }, 1f)
             }
             if (i == 1 && mode != 2) add(line, View(this), 0.5f)
@@ -509,10 +560,17 @@ class ImeService : InputMethodService(), LifecycleOwner {
             keyArea.addView(line)
         }
 
-        if (strokeMode) keyArea.addView(strokePage())
-
         val b = LinearLayout(this)
-        if (mode == 2) {
+        if (mode == 1) {
+            add(b, cell("123", 14f, "#D0D0D0") {
+                lastLetterMode = mode; mode = 3; render()
+            }, 1.15f)
+            add(b, cell("😀", 18f, "#D0D0D0") { openEmojiPanel(1) }, 0.8f)
+            add(b, cell(",", 20f, "#FFFFFF") { commit(",") }, 0.7f)
+            add(b, spaceKey("🎙", { commit(" ") }), 3.5f)
+            add(b, cell("英", 15f, "#D0D0D0") { mode = 0; scheme = enabledSchemes()[0]; shift = false; render() }, 1f)
+            add(b, cell("換行", 15f, "#07C160", Color.WHITE) { onEnter() }, 1.35f)
+        } else if (mode == 2) {
             add(b, cell("ABC", 15f, "#D0D0D0") { mode = lastLetterMode; render(); showCands() }, 1.5f)
         } else {
             add(b, cell("符", 15f, "#D0D0D0") {
@@ -528,17 +586,19 @@ class ImeService : InputMethodService(), LifecycleOwner {
         }
         val comma = if (zh) "，" else ","
         val period = if (zh) "。" else "."
-        add(b, cell(comma, 20f, "#FFFFFF") { onPunc(comma) }, 1f)
-        add(b, cell("空格", 15f, "#FFFFFF") { onSpace() }, 3f)
-        add(b, cell(period, 20f, "#FFFFFF") { onPunc(period) }, 1f)
-        add(b, cell("123", 15f, "#D0D0D0") {
-            commitAll()
-            if (mode < 2) lastLetterMode = mode
-            mode = 3
-            shift = false
-            render()
-        }, 1.2f)
-        add(b, cell("⏎", 18f, "#07C160", Color.WHITE) { onEnter() }, 1.5f)
+        if (mode != 1) {
+            add(b, cell(comma, 20f, "#FFFFFF") { onPunc(comma) }, 1f)
+            add(b, spaceKey("空格"), 3f)
+            add(b, cell(period, 20f, "#FFFFFF") { onPunc(period) }, 1f)
+            add(b, cell("123", 15f, "#D0D0D0") {
+                commitAll()
+                if (mode < 2) lastLetterMode = mode
+                mode = 3
+                shift = false
+                render()
+            }, 1.2f)
+            add(b, cell("⏎", 18f, "#07C160", Color.WHITE) { onEnter() }, 1.5f)
+        }
         keyArea.addView(b)
     }
 
@@ -592,7 +652,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
             candBar.addView(TextView(this).apply {
                 text = c.first
                 textSize = 20f
-                setTextColor(if (i == 0) Color.parseColor("#07C160") else Color.BLACK)
+                setTextColor(if (i == 0) Color.parseColor("#07C160") else Color.WHITE)
                 gravity = Gravity.CENTER
                 setPadding(dp(14), 0, dp(14), 0)
                 setOnClickListener { pick(c) }
@@ -662,31 +722,47 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
     /** 筆劃鍵盤：橫、豎、撇、點、折五個筆劃鍵 + 清除 + 常用標點；刪除鍵在右邊。 */
     private fun strokePage(): View {
-        val h = dp(54) * 3
-        val wrap = LinearLayout(this)
-        fun key(row: LinearLayout, label: String, bg: String, size: Float, click: () -> Unit) {
-            row.addView(
-                cell(label, size, bg, Color.BLACK, click),
-                LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) }
-            )
+        val wrap = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun sideKey(col: LinearLayout, label: String, action: () -> Unit) {
+            col.addView(cell(label, 17f, "#343638", Color.WHITE, action),
+                LinearLayout.LayoutParams(-1, 0, 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) })
         }
-        val r1 = LinearLayout(this)
-        val r2 = LinearLayout(this)
-        val r3 = LinearLayout(this)
-        key(r1, "一", "#FFFFFF", 26f) { onChar('h') }
-        key(r1, "丨", "#FFFFFF", 26f) { onChar('s') }
-        key(r1, "丿", "#FFFFFF", 26f) { onChar('p') }
-        key(r2, "丶", "#FFFFFF", 26f) { onChar('n') }
-        key(r2, "乙", "#FFFFFF", 26f) { onChar('z') }
-        key(r2, "清除", "#D0D0D0", 15f) { clearComp() }
-        for (s in listOf("，", "。", "？", "！", "、")) key(r3, s, "#FFFFFF", 20f) { onPunc(s) }
-        val grid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        for (r in listOf(r1, r2, r3)) grid.addView(r, LinearLayout.LayoutParams(-1, 0, 1f))
+        val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        listOf("7", "?", "+", "\\").forEach { s -> sideKey(left, s) { onPunc(s) } }
+
+        val center = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fun strokeRow(labels: List<Pair<String, () -> Unit>>) {
+            val row = LinearLayout(this@ImeService)
+            for ((label, action) in labels) {
+                row.addView(cell(label, if (label.length > 2) 18f else 25f, "#4A4A4A", Color.WHITE, action),
+                    LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) })
+            }
+            center.addView(row, LinearLayout.LayoutParams(-1, 0, 1f))
+        }
+        strokeRow(listOf("一" to { onChar('h') }, "丨" to { onChar('s') }, "丿" to { onChar('p') }))
+        strokeRow(listOf("丶" to { onChar('n') }, "乙" to { onChar('z') }, "＊" to { onPunc("＊") }))
+        strokeRow(listOf("@#" to { commitAll(); mode = 2; render() }, "，" to { onPunc("，") }, "ABC" to { commitAll(); lastLetterMode = 1; mode = 1; shift = false; render() }))
+
         val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        right.addView(delKey(), LinearLayout.LayoutParams(-1, -1).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) })
-        wrap.addView(grid, LinearLayout.LayoutParams(0, h, 4.2f))
-        wrap.addView(right, LinearLayout.LayoutParams(0, h, 1.2f))
+        right.addView(delKey(), LinearLayout.LayoutParams(-1, 0, 1f).apply {
+            setMargins(dp(3), dp(3), dp(3), dp(3))
+        })
+        sideKey(right, "重輸") { clearComp() }
+        sideKey(right, "😀") { openEmojiPanel(1) }
+        wrap.addView(left, LinearLayout.LayoutParams(0, dp(162), 0.75f))
+        wrap.addView(center, LinearLayout.LayoutParams(0, dp(162), 3.5f))
+        wrap.addView(right, LinearLayout.LayoutParams(0, dp(162), 0.85f))
         return wrap
+    }
+
+    private fun strokeBottomRow(): View {
+        val row = LinearLayout(this)
+        add(row, cell("符號", 14f, "#343638") { commitAll(); mode = 2; render() }, 1.15f)
+        add(row, cell("123", 14f, "#343638") { commitAll(); lastLetterMode = 0; mode = 3; render() }, 1f)
+        add(row, spaceKey("🎙", { onSpace() }), 3.4f)
+        add(row, cell("筆", 16f, "#343638") { cycleLang() }, 1f)
+        add(row, cell("換行", 14f, "#07C160", Color.WHITE) { onEnter() }, 1.2f)
+        return row
     }
 
     private fun clearComp() {
