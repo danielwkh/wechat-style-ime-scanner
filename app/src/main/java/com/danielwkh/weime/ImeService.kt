@@ -516,7 +516,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
                 cornerRadius = dp(6).toFloat()
             }
             addView(TextView(this@ImeService).apply {
-                text = if (shift) ch.uppercaseChar() else ch
+                text = (if (shift) ch.uppercaseChar() else ch).toString()
                 textSize = 21f
                 setTextColor(Color.WHITE)
                 gravity = Gravity.CENTER
