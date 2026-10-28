@@ -503,6 +503,39 @@ class ImeService : InputMethodService(), LifecycleOwner {
         return s
     }
 
+    /** 英文鍵帽將小副標固定在右上角，主字母獨立置中，避免多行文字把字母擠到下緣。 */
+    private fun alphaKey(ch: Char, row: Int): View {
+        val secondary = when (row) {
+            0 -> "1234567890".getOrNull("qwertyuiop".indexOf(ch.lowercaseChar()))?.toString().orEmpty()
+            1 -> "-/:;()\$&@".getOrNull("asdfghjkl".indexOf(ch.lowercaseChar()))?.toString().orEmpty()
+            else -> ""
+        }
+        return FrameLayout(this).apply {
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#4A4A4A"))
+                cornerRadius = dp(6).toFloat()
+            }
+            addView(TextView(this@ImeService).apply {
+                text = if (shift) ch.uppercaseChar() else ch
+                textSize = 21f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                translationY = -dp(2).toFloat()
+            }, FrameLayout.LayoutParams(-1, -1))
+            if (secondary.isNotEmpty()) addView(TextView(this@ImeService).apply {
+                text = secondary
+                textSize = 9f
+                setTextColor(Color.LTGRAY)
+                gravity = Gravity.TOP or Gravity.END
+                setPadding(0, dp(3), dp(6), 0)
+            }, FrameLayout.LayoutParams(-1, -1))
+            setOnClickListener {
+                onChar(ch)
+                saveState()
+            }
+        }
+    }
+
     /** 短按輸入空格；長按直接打開離線語音並開始錄音。 */
     private fun spaceKey(label: String, shortAction: () -> Unit = { onSpace() }): View {
         val v = cell(label, 16f, "#4A4A4A", Color.WHITE, shortAction)
@@ -551,9 +584,15 @@ class ImeService : InputMethodService(), LifecycleOwner {
             }
             for (ch in r) {
                 val cjKeys = mode == 0 && scheme != 0
-                val label: CharSequence =
-                    if (cjKeys) cjLabel(ch) else if (mode != 2) alphaLabel(ch, i) else ch.toString()
-                add(line, cell(label, if (cjKeys) 16f else 20f, "#FFFFFF") { onChar(ch) }, 1f)
+                val key = when {
+                    cjKeys -> cell(cjLabel(ch), 16f, "#FFFFFF") { onChar(ch) }
+                    mode == 1 && i < 2 -> alphaKey(ch, i)
+                    else -> {
+                        val label = if (mode != 2) alphaLabel(ch, i) else ch.toString()
+                        cell(label, 20f, "#FFFFFF") { onChar(ch) }
+                    }
+                }
+                add(line, key, 1f)
             }
             if (i == 1 && mode != 2) add(line, View(this), 0.5f)
             if (i == 2) add(line, delKey(), 1.5f)   // 刪除鍵固定在第三行最右邊
