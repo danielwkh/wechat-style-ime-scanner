@@ -442,7 +442,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         }
         val before = c.getTextBeforeCursor(2, 0) ?: return null
         if (before.isEmpty()) return null
-        val cp = before.codePointBefore(before.length)
+        val cp = Character.codePointBefore(before, before.length)
         val count = Character.charCount(cp)
         val removed = before.substring(before.length - count)
         if (!c.deleteSurroundingTextInCodePoints(1, 0)) return null
