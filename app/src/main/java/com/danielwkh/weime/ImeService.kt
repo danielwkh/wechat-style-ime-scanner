@@ -54,7 +54,7 @@ import org.json.JSONArray
 import kotlin.math.abs
 import kotlin.math.sqrt
 
-/** 整個鍵盤的容器：長按任何位置後，拖動即可移動游標（左右＝左右，上下＝上下行）。 */
+/** 鍵盤上按住並拖動即可移動游標；明確抑制的手勢（字母選字、刪除）由按鍵自行處理。 */
 class KeyboardRoot(
     ctx: Context,
     private val stepX: Int,
@@ -74,16 +74,6 @@ class KeyboardRoot(
     private var longPressed = false
     private val slop = ViewConfiguration.get(ctx).scaledTouchSlop
 
-    private val longRun = Runnable {
-        if (suppress) return@Runnable
-        longPressed = true
-        accX = 0f
-        accY = 0f
-        cancelChildren()
-        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-        onStart()
-    }
-
     private fun cancelChildren() {
         val now = SystemClock.uptimeMillis()
         val c = MotionEvent.obtain(now, now, MotionEvent.ACTION_CANCEL, downX, downY, 0)
@@ -100,10 +90,9 @@ class KeyboardRoot(
                 downX = ev.x; downY = ev.y
                 lastX = ev.x; lastY = ev.y
                 longPressed = false
-                removeCallbacks(longRun)
-                postDelayed(longRun, 350)
             }
             MotionEvent.ACTION_MOVE -> {
+                if (suppress) return super.dispatchTouchEvent(ev)
                 if (longPressed) {
                     accX += ev.x - lastX
                     accY += ev.y - lastY
@@ -114,10 +103,24 @@ class KeyboardRoot(
                     while (accY <= -stepY) { onMove(0, -1); accY += stepY }
                     return true
                 }
-                if (abs(ev.x - downX) > slop || abs(ev.y - downY) > slop) removeCallbacks(longRun)
+                if (abs(ev.x - downX) > slop || abs(ev.y - downY) > slop) {
+                    longPressed = true
+                    accX = 0f
+                    accY = 0f
+                    cancelChildren()
+                    performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                    onStart()
+                    accX = ev.x - downX
+                    accY = ev.y - downY
+                    lastX = ev.x; lastY = ev.y
+                    while (accX >= stepX) { onMove(1, 0); accX -= stepX }
+                    while (accX <= -stepX) { onMove(-1, 0); accX += stepX }
+                    while (accY >= stepY) { onMove(0, 1); accY -= stepY }
+                    while (accY <= -stepY) { onMove(0, -1); accY += stepY }
+                    return true
+                }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                removeCallbacks(longRun)
                 if (longPressed) {
                     longPressed = false
                     onEnd()
@@ -265,14 +268,15 @@ class ImeService : InputMethodService(), LifecycleOwner {
                     setColor(Color.parseColor("#303134"))
                 }
             }
-            tools.addView(t, LinearLayout.LayoutParams(dp(38), dp(38)).apply { setMargins(dp(5), 0, dp(5), 0) })
+            tools.addView(t, LinearLayout.LayoutParams(dp(34), dp(34)).apply { setMargins(dp(3), 0, dp(3), 0) })
             return t
         }
-        tool("📋", 17f) { openClipPanel() }
-        convBtn = tool(if (simplified) "简" else "繁", 17f) { toggleSimplified() }
-        tool("😀", 17f) { openEmojiPanel(1) }
-        tool("🎤", 17f) { startVoice() }
-        tool("⚙", 17f) { openSettings() }
+        tool("📷", 15f) { toggleScan() }
+        tool("📋", 15f) { openClipPanel() }
+        convBtn = tool(if (simplified) "简" else "繁", 15f) { toggleSimplified() }
+        tool("😀", 15f) { openEmojiPanel(1) }
+        tool("🎤", 15f) { startVoice() }
+        tool("⚙", 15f) { openSettings() }
         toolbar.addView(tools)
 
         // 候選字列
@@ -413,51 +417,54 @@ class ImeService : InputMethodService(), LifecycleOwner {
             }
         }
 
-    private var delHeld = false
+    private data class DeletedUnit(val text: String, val composing: Boolean)
     private var delView: View? = null
+    private var deleteGestureActive = false
 
     private fun stopDelRepeat() {
-        delHeld = false
-        handler.removeCallbacks(repeatDel)
+        deleteGestureActive = false
         delView?.alpha = 1f
         delView = null
     }
 
-    private val repeatDel = object : Runnable {
-        override fun run() {
-            if (!delHeld) return
-            val v = delView
-            // 手指已不在刪除鍵上、或鍵盤已換畫面／隱藏，就立刻停止
-            if (v == null || !v.isAttachedToWindow || !v.isShown) { stopDelRepeat(); return }
-            if (!deleteStep()) { stopDelRepeat(); return }
-            handler.postDelayed(this, 60)
-        }
-    }
-
-    /** 連續刪除的一步：先確認編輯框真的還有東西可刪，並同步等它處理完，避免事件堆積、放手後還繼續刪。 */
-    private fun deleteStep(): Boolean {
+    private fun deleteUnit(): DeletedUnit? {
         if (comp.isNotEmpty()) {
+            val ch = comp.substring(comp.length - 1)
             comp.deleteCharAt(comp.length - 1)
             refresh()
-            return true
+            return DeletedUnit(ch, true)
         }
-        val c = ic ?: return false
-        if (!c.getSelectedText(0).isNullOrEmpty()) {
+        val c = ic ?: return null
+        val selected = c.getSelectedText(0)?.toString()
+        if (!selected.isNullOrEmpty()) {
             c.commitText("", 1)
-            return true
+            return DeletedUnit(selected, false)
         }
-        val before = c.getTextBeforeCursor(1, 0) ?: run {
-            sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
-            return true
-        }
-        if (before.isEmpty()) return false
-        sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
-        c.getTextBeforeCursor(1, 0)
-        return true
+        val before = c.getTextBeforeCursor(2, 0) ?: return null
+        if (before.isEmpty()) return null
+        val cp = before.codePointBefore(before.length)
+        val count = Character.charCount(cp)
+        val removed = before.substring(before.length - count)
+        if (!c.deleteSurroundingTextInCodePoints(1, 0)) return null
+        return DeletedUnit(removed, false)
     }
 
-    /** 刪除鍵：按住會連續刪除；放手、手指移開、再按任何鍵都會停止。 */
+    private fun restoreDeleted(unit: DeletedUnit) {
+        if (unit.composing) {
+            comp.append(unit.text)
+            refresh()
+        } else {
+            ic?.commitText(unit.text, 1)
+        }
+    }
+
+    /** 刪除鍵：點按刪一字；按住向左逐步刪除、向右恢復本次已刪內容，放手確認。 */
     private fun delKey(): TextView = cell("⌫", 18f, "#D0D0D0") {}.apply {
+        var lastX = 0f
+        var lastTime = 0L
+        var accum = 0f
+        val undo = ArrayList<DeletedUnit>()
+        val threshold = dp(9).toFloat()
         addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
             override fun onViewAttachedToWindow(v: View) {}
             override fun onViewDetachedFromWindow(v: View) {
@@ -469,16 +476,38 @@ class ImeService : InputMethodService(), LifecycleOwner {
                 MotionEvent.ACTION_DOWN -> {
                     kbRoot.suppress = true
                     stopDelRepeat()
-                    delHeld = true
+                    undo.clear()
+                    accum = 0f
+                    lastX = e.x
+                    lastTime = e.eventTime
+                    deleteGestureActive = true
                     delView = v
                     v.alpha = 0.6f
-                    onBackspace()
-                    handler.postDelayed(repeatDel, 400)
+                    deleteUnit()?.let { undo.add(it) }
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (e.x < 0 || e.y < 0 || e.x > v.width || e.y > v.height) stopDelRepeat()
+                    if (!deleteGestureActive) return@setOnTouchListener true
+                    val dx = e.x - lastX
+                    val dt = (e.eventTime - lastTime).coerceAtLeast(1L).toFloat()
+                    lastX = e.x
+                    lastTime = e.eventTime
+                    val speed = (abs(dx) / dp(1).toFloat() / dt / 0.5f).coerceIn(0f, 3f)
+                    accum += dx * (1f + speed)
+                    while (accum <= -threshold) {
+                        deleteUnit()?.let { undo.add(it) }
+                        accum += threshold
+                    }
+                    while (accum >= threshold) {
+                        if (undo.isNotEmpty()) restoreDeleted(undo.removeAt(undo.lastIndex))
+                        accum -= threshold
+                    }
+                    if (undo.isEmpty() && accum > 0f) accum = 0f
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> stopDelRepeat()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    stopDelRepeat()
+                    kbRoot.suppress = false
+                    undo.clear()
+                }
             }
             true
         }
@@ -512,6 +541,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
             else -> ""
         }
         return FrameLayout(this).apply {
+            val keyAnchor = this
             background = GradientDrawable().apply {
                 setColor(Color.parseColor("#4A4A4A"))
                 cornerRadius = dp(6).toFloat()
@@ -530,17 +560,24 @@ class ImeService : InputMethodService(), LifecycleOwner {
                 gravity = Gravity.TOP or Gravity.END
                 setPadding(0, dp(3), dp(6), 0)
             }, FrameLayout.LayoutParams(-1, -1))
-            setOnClickListener {
-                onChar(ch)
-                saveState()
+            var touching = false
+            var draggingCursor = false
+            var downX = 0f
+            var downY = 0f
+            var lastX = 0f
+            var lastY = 0f
+            var accX = 0f
+            var accY = 0f
+            var choiceIndex = 0
+            var popup: android.widget.PopupWindow? = null
+            var primaryOption: TextView? = null
+            var secondaryOption: TextView? = null
+            fun paintChoice() {
+                primaryOption?.setBackgroundColor(Color.parseColor(if (choiceIndex == 0) "#07C160" else "#343638"))
+                secondaryOption?.setBackgroundColor(Color.parseColor(if (choiceIndex == 1) "#07C160" else "#343638"))
             }
-            setOnTouchListener { _, e ->
-                if (e.actionMasked == MotionEvent.ACTION_DOWN) kbRoot.suppress = true
-                false
-            }
-            setOnLongClickListener {
-                if (secondary.isEmpty()) return@setOnLongClickListener false
-                kbRoot.suppress = true
+            fun showChoices() {
+                if (secondary.isEmpty() || !touching || popup != null) return
                 val content = LinearLayout(this@ImeService).apply {
                     orientation = LinearLayout.HORIZONTAL
                     setPadding(dp(3), dp(3), dp(3), dp(3))
@@ -549,26 +586,96 @@ class ImeService : InputMethodService(), LifecycleOwner {
                         cornerRadius = dp(8).toFloat()
                     }
                 }
-                val popup = android.widget.PopupWindow(content, dp(112), dp(50), true).apply {
+                val primary = if (mode == 1 && !shift) ch.uppercaseChar() else ch
+                primaryOption = TextView(this@ImeService).apply {
+                    text = primary.toString(); textSize = 20f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+                }
+                secondaryOption = TextView(this@ImeService).apply {
+                    text = secondary; textSize = 20f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+                }
+                content.addView(primaryOption, LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(2), 0, dp(2), 0) })
+                content.addView(secondaryOption, LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(2), 0, dp(2), 0) })
+                paintChoice()
+                val choicesPopup = android.widget.PopupWindow(content, dp(112), dp(50), false).apply {
                     setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+                    setTouchable(false)
                     elevation = dp(8).toFloat()
                 }
-                fun choice(label: String, action: () -> Unit) {
-                    content.addView(TextView(this@ImeService).apply {
-                        text = label
-                        textSize = 20f
-                        setTextColor(Color.WHITE)
-                        gravity = Gravity.CENTER
-                        setOnClickListener { popup.dismiss(); action() }
-                    }, LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(2), 0, dp(2), 0) })
+                choicesPopup.showAsDropDown(keyAnchor, 0, -dp(56))
+                popup = choicesPopup
+            }
+            val showChoiceRun = Runnable { showChoices() }
+            fun updateChoice(rawX: Float) {
+                val pos = IntArray(2)
+                getLocationOnScreen(pos)
+                choiceIndex = if (rawX > pos[0] + width / 2f) 1 else 0
+                paintChoice()
+            }
+            setOnTouchListener { _, e ->
+                when (e.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        touching = true
+                        draggingCursor = false
+                        kbRoot.suppress = true
+                        downX = e.x; downY = e.y; lastX = e.x; lastY = e.y
+                        choiceIndex = 0
+                        handler.removeCallbacks(showChoiceRun)
+                        handler.postDelayed(showChoiceRun, ViewConfiguration.getLongPressTimeout().toLong())
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        if (popup != null) {
+                            updateChoice(e.rawX)
+                        } else if (!draggingCursor && (abs(e.x - downX) > ViewConfiguration.get(this@ImeService).scaledTouchSlop || abs(e.y - downY) > ViewConfiguration.get(this@ImeService).scaledTouchSlop)) {
+                            handler.removeCallbacks(showChoiceRun)
+                            draggingCursor = true
+                            cursorStart()
+                            accX = e.x - downX; accY = e.y - downY
+                            lastX = e.x; lastY = e.y
+                            while (accX >= dp(9)) { moveCursor(1, 0); accX -= dp(9) }
+                            while (accX <= -dp(9)) { moveCursor(-1, 0); accX += dp(9) }
+                            while (accY >= dp(30)) { moveCursor(0, 1); accY -= dp(30) }
+                            while (accY <= -dp(30)) { moveCursor(0, -1); accY += dp(30) }
+                        } else if (draggingCursor) {
+                            accX += e.x - lastX; accY += e.y - lastY
+                            lastX = e.x; lastY = e.y
+                            while (accX >= dp(9)) { moveCursor(1, 0); accX -= dp(9) }
+                            while (accX <= -dp(9)) { moveCursor(-1, 0); accX += dp(9) }
+                            while (accY >= dp(30)) { moveCursor(0, 1); accY -= dp(30) }
+                            while (accY <= -dp(30)) { moveCursor(0, -1); accY += dp(30) }
+                        }
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        handler.removeCallbacks(showChoiceRun)
+                        if (popup != null) {
+                            updateChoice(e.rawX)
+                            popup?.dismiss(); popup = null
+                            if (choiceIndex == 0 && mode == 1) {
+                                val altCase = if (shift) ch else ch.uppercaseChar()
+                                commit(altCase.toString())
+                                if (shift) { shift = false; render() }
+                            } else if (choiceIndex == 0) onChar(ch) else {
+                                if (mode == 0) commitAll()
+                                commit(secondary)
+                            }
+                            saveState()
+                        } else if (draggingCursor) {
+                            keyArea.alpha = 1f
+                        } else {
+                            onChar(ch)
+                            saveState()
+                        }
+                        touching = false
+                        kbRoot.suppress = false
+                        primaryOption = null; secondaryOption = null
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        handler.removeCallbacks(showChoiceRun)
+                        popup?.dismiss(); popup = null
+                        touching = false; draggingCursor = false; kbRoot.suppress = false
+                        keyArea.alpha = 1f
+                        primaryOption = null; secondaryOption = null
+                    }
                 }
-                choice((if (shift) ch.uppercaseChar() else ch).toString()) { onChar(ch); saveState() }
-                choice(secondary) {
-                    if (mode == 0) commitAll()
-                    commit(secondary)
-                    saveState()
-                }
-                popup.showAsDropDown(this, 0, -dp(56))
                 true
             }
         }
@@ -577,18 +684,66 @@ class ImeService : InputMethodService(), LifecycleOwner {
     /** 短按輸入空格；長按直接打開離線語音並開始錄音。 */
     private fun spaceKey(label: String, shortAction: () -> Unit = { onSpace() }): View {
         val v = cell(label, 16f, "#4A4A4A", Color.WHITE, shortAction)
-        v.setOnTouchListener { _, e ->
-            if (e.actionMasked == MotionEvent.ACTION_DOWN) kbRoot.suppress = true
-            false
+        var touching = false
+        var voiceHold = false
+        var cursorDrag = false
+        var downX = 0f; var downY = 0f; var lastX = 0f; var lastY = 0f
+        var accX = 0f; var accY = 0f
+        val voiceRun = Runnable {
+            if (touching && !cursorDrag) {
+                voiceHold = true
+                startVoice()
+                handler.postDelayed({
+                    if (touching && voiceHold && ::extraPanel.isInitialized && extraPanel.visibility == View.VISIBLE && voiceBtn != null && !recording && !voiceBusy) {
+                        startRecording()
+                    }
+                }, 120)
+            }
         }
-        v.setOnLongClickListener {
-            kbRoot.suppress = true
-            startVoice()
-            handler.postDelayed({
-                if (::extraPanel.isInitialized && extraPanel.visibility == View.VISIBLE && voiceBtn != null && !recording && !voiceBusy) {
-                    startRecording()
+        v.setOnTouchListener { _, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    touching = true; voiceHold = false; cursorDrag = false
+                    kbRoot.suppress = true
+                    downX = e.x; downY = e.y; lastX = e.x; lastY = e.y
+                    accX = 0f; accY = 0f
+                    handler.removeCallbacks(voiceRun)
+                    handler.postDelayed(voiceRun, ViewConfiguration.getLongPressTimeout().toLong())
                 }
-            }, 120)
+                MotionEvent.ACTION_MOVE -> {
+                    if (!voiceHold && !cursorDrag && (abs(e.x - downX) > ViewConfiguration.get(this).scaledTouchSlop || abs(e.y - downY) > ViewConfiguration.get(this).scaledTouchSlop)) {
+                        handler.removeCallbacks(voiceRun)
+                        cursorDrag = true
+                        cursorStart()
+                        accX = e.x - downX; accY = e.y - downY
+                        lastX = e.x; lastY = e.y
+                        while (accX >= dp(9)) { moveCursor(1, 0); accX -= dp(9) }
+                        while (accX <= -dp(9)) { moveCursor(-1, 0); accX += dp(9) }
+                        while (accY >= dp(30)) { moveCursor(0, 1); accY -= dp(30) }
+                        while (accY <= -dp(30)) { moveCursor(0, -1); accY += dp(30) }
+                    } else if (cursorDrag) {
+                        accX += e.x - lastX; accY += e.y - lastY
+                        lastX = e.x; lastY = e.y
+                        while (accX >= dp(9)) { moveCursor(1, 0); accX -= dp(9) }
+                        while (accX <= -dp(9)) { moveCursor(-1, 0); accX += dp(9) }
+                        while (accY >= dp(30)) { moveCursor(0, 1); accY -= dp(30) }
+                        while (accY <= -dp(30)) { moveCursor(0, -1); accY += dp(30) }
+                    }
+                }
+                MotionEvent.ACTION_UP -> {
+                    handler.removeCallbacks(voiceRun)
+                    if (voiceHold) {
+                        if (recording) stopVoice(false)
+                    } else if (cursorDrag) keyArea.alpha = 1f else shortAction()
+                    touching = false; voiceHold = false; kbRoot.suppress = false
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    handler.removeCallbacks(voiceRun)
+                    if (voiceHold) stopVoice(true)
+                    touching = false; voiceHold = false; cursorDrag = false; kbRoot.suppress = false
+                    keyArea.alpha = 1f
+                }
+            }
             true
         }
         return v
