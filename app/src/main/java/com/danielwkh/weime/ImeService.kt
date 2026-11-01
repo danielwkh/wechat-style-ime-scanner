@@ -508,6 +508,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         val secondary = when (row) {
             0 -> "1234567890".getOrNull("qwertyuiop".indexOf(ch.lowercaseChar()))?.toString().orEmpty()
             1 -> "-/:;()\$&@".getOrNull("asdfghjkl".indexOf(ch.lowercaseChar()))?.toString().orEmpty()
+            2 -> "@#\$%&?!".getOrNull("zxcvbnm".indexOf(ch.lowercaseChar()))?.toString().orEmpty()
             else -> ""
         }
         return FrameLayout(this).apply {
@@ -532,6 +533,43 @@ class ImeService : InputMethodService(), LifecycleOwner {
             setOnClickListener {
                 onChar(ch)
                 saveState()
+            }
+            setOnTouchListener { _, e ->
+                if (e.actionMasked == MotionEvent.ACTION_DOWN) kbRoot.suppress = true
+                false
+            }
+            setOnLongClickListener {
+                if (secondary.isEmpty()) return@setOnLongClickListener false
+                kbRoot.suppress = true
+                val content = LinearLayout(this@ImeService).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    setPadding(dp(3), dp(3), dp(3), dp(3))
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#242629"))
+                        cornerRadius = dp(8).toFloat()
+                    }
+                }
+                val popup = android.widget.PopupWindow(content, dp(112), dp(50), true).apply {
+                    setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+                    elevation = dp(8).toFloat()
+                }
+                fun choice(label: String, action: () -> Unit) {
+                    content.addView(TextView(this@ImeService).apply {
+                        text = label
+                        textSize = 20f
+                        setTextColor(Color.WHITE)
+                        gravity = Gravity.CENTER
+                        setOnClickListener { popup.dismiss(); action() }
+                    }, LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(2), 0, dp(2), 0) })
+                }
+                choice((if (shift) ch.uppercaseChar() else ch).toString()) { onChar(ch); saveState() }
+                choice(secondary) {
+                    if (mode == 0) commitAll()
+                    commit(secondary)
+                    saveState()
+                }
+                popup.showAsDropDown(this, 0, -dp(56))
+                true
             }
         }
     }
@@ -586,7 +624,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
                 val cjKeys = mode == 0 && scheme != 0
                 val key = when {
                     cjKeys -> cell(cjLabel(ch), 16f, "#FFFFFF") { onChar(ch) }
-                    mode == 1 && i < 2 -> alphaKey(ch, i)
+                    (mode == 1 || (mode == 0 && scheme == 0)) -> alphaKey(ch, i)
                     else -> {
                         val label = if (mode != 2) alphaLabel(ch, i) else ch.toString()
                         cell(label, 20f, "#FFFFFF") { onChar(ch) }
