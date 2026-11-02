@@ -376,6 +376,11 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
+        if (!prefs.contains("outName") && ProductDb.hasDatabase(this)) {
+            prefs.edit().putBoolean("outName", true).apply()
+        }
+        outName = prefs.getBoolean("outName", outName)
+        if (::outBtn.isInitialized) outBtn.text = if (outName) "輸出名" else "輸出碼"
         checkClip()
     }
 
@@ -596,12 +601,13 @@ class ImeService : InputMethodService(), LifecycleOwner {
                 content.addView(primaryOption, LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(2), 0, dp(2), 0) })
                 content.addView(secondaryOption, LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(2), 0, dp(2), 0) })
                 paintChoice()
-                val choicesPopup = android.widget.PopupWindow(content, dp(112), dp(50), false).apply {
+                val popupHeight = dp(50)
+                val choicesPopup = android.widget.PopupWindow(content, dp(112), popupHeight, false).apply {
                     setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
                     setTouchable(false)
                     elevation = dp(8).toFloat()
                 }
-                choicesPopup.showAsDropDown(keyAnchor, 0, -dp(56))
+                choicesPopup.showAsDropDown(keyAnchor, 0, -(keyAnchor.height + popupHeight))
                 popup = choicesPopup
             }
             val showChoiceRun = Runnable { showChoices() }
@@ -851,18 +857,18 @@ class ImeService : InputMethodService(), LifecycleOwner {
         }
 
         val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        for (s in listOf("，", "。", "？", "！")) key(left, s, "#FFFFFF", 1f) { commit(s) }
+        for (s in listOf("，", "。", "？", "！")) key(left, s, "#FFFFFF", 1f, size = 16f) { commit(s) }
 
         val mid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         for (r in listOf("123", "456", "789")) {
             val row = LinearLayout(this)
-            for (d in r) key(row, d.toString(), "#FFFFFF", 1f, size = 22f) { commit(d.toString()) }
+            for (d in r) key(row, d.toString(), "#FFFFFF", 1f, size = 26f) { commit(d.toString()) }
             mid.addView(row, LinearLayout.LayoutParams(-1, 0, 1f))
         }
         val last = LinearLayout(this)
         key(last, "ABC", "#D0D0D0", 1f, size = 15f) { mode = lastLetterMode; render() }
-        key(last, "0", "#FFFFFF", 1f, size = 22f) { commit("0") }
-        key(last, ".", "#FFFFFF", 1f, size = 22f) { commit(".") }
+        key(last, "0", "#FFFFFF", 1f, size = 26f) { commit("0") }
+        key(last, ".", "#FFFFFF", 1f, size = 18f) { commit(".") }
         mid.addView(last, LinearLayout.LayoutParams(-1, 0, 1f))
 
         val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -872,8 +878,8 @@ class ImeService : InputMethodService(), LifecycleOwner {
         key(right, "空格", "#FFFFFF", 1f, size = 15f) { commit(" ") }
         key(right, "⏎", "#07C160", 2f, Color.WHITE, 18f) { onEnter() }
 
-        wrap.addView(left, LinearLayout.LayoutParams(0, h, 1f))
-        wrap.addView(mid, LinearLayout.LayoutParams(0, h, 3f))
+        wrap.addView(left, LinearLayout.LayoutParams(0, h, 0.85f))
+        wrap.addView(mid, LinearLayout.LayoutParams(0, h, 3.15f))
         wrap.addView(right, LinearLayout.LayoutParams(0, h, 1.3f))
         return wrap
     }
@@ -1202,6 +1208,11 @@ class ImeService : InputMethodService(), LifecycleOwner {
         body.addView(voiceBtn, lp(dp(84), dp(84)).apply { topMargin = dp(16) })
         body.addView(voiceStatus, lp(-1, -2).apply { topMargin = dp(10) })
         root.addView(body, lp(-1, 0, 1f))
+        val footer = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        footer.addView(View(this@ImeService), lp(0, dp(46), 1f))
+        footer.addView(delKey(), lp(dp(62), dp(40), 0f, dp(3)))
+        footer.addView(cell("⏎", 18f, "#07C160", Color.WHITE) { onEnter() }, lp(dp(70), dp(40), 0f, dp(3)))
+        root.addView(footer, lp(-1, dp(46)))
         openPanel(root)
     }
 

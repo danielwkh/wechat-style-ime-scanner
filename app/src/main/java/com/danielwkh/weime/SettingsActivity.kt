@@ -124,8 +124,9 @@ class SettingsActivity : Activity() {
         Thread {
             try {
                 val r = ProductDb.import(this, uri)
+                getSharedPreferences("kb", MODE_PRIVATE).edit().putBoolean("outName", true).apply()
                 runOnUiThread {
-                    dbStatus.text = "商品庫：共 ${r.count} 筆（新增 ${r.added}、更新名稱 ${r.updated}、相同略過 ${r.skipped}）\n名稱欄＝${r.nameLabel}；條碼欄＝${r.codeLabels}"
+                    dbStatus.text = "商品庫：共 ${r.count} 筆（新增 ${r.added}、更新名稱 ${r.updated}、相同略過 ${r.skipped}）\n名稱欄＝${r.nameLabel}；條碼欄＝${r.codeLabels}\n掃描輸出已切換為商品名稱。"
                 }
             } catch (e: Exception) {
                 runOnUiThread { dbStatus.text = "匯入失敗：${e.message}" }

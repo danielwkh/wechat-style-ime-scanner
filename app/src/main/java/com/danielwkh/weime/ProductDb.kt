@@ -37,6 +37,8 @@ object ProductDb {
 
     private fun file(ctx: Context) = File(ctx.filesDir, "products.tsv")
 
+    fun hasDatabase(ctx: Context): Boolean = file(ctx).let { it.isFile && it.length() > 0L }
+
     /** 去掉前導 0，避免 Excel 把 0123… 存成數字後對不上。 */
     private fun norm(code: String) = code.trim().trimStart('0')
 
