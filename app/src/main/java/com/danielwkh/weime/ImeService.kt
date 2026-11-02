@@ -166,6 +166,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private val ocrSeen = HashMap<String, Int>()
     private var scanStart = 0L
     private var lastOcr = 0L
+    private var lastLookupHint = 0L
     private var outName = false          // false＝輸出條碼數字，true＝輸出商品名
     private lateinit var outBtn: TextView
 
@@ -425,8 +426,11 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private data class DeletedUnit(val text: String, val composing: Boolean)
     private var delView: View? = null
     private var deleteGestureActive = false
+    private var delRepeatRun: Runnable? = null
 
     private fun stopDelRepeat() {
+        delRepeatRun?.let { handler.removeCallbacks(it) }
+        delRepeatRun = null
         deleteGestureActive = false
         delView?.alpha = 1f
         delView = null
@@ -465,11 +469,14 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
     /** 刪除鍵：點按刪一字；按住向左逐步刪除、向右恢復本次已刪內容，放手確認。 */
     private fun delKey(): TextView = cell("⌫", 18f, "#D0D0D0") {}.apply {
+        var downX = 0f
         var lastX = 0f
         var lastTime = 0L
         var accum = 0f
+        var moved = false
         val undo = ArrayList<DeletedUnit>()
         val threshold = dp(9).toFloat()
+        val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
         addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
             override fun onViewAttachedToWindow(v: View) {}
             override fun onViewDetachedFromWindow(v: View) {
@@ -483,15 +490,37 @@ class ImeService : InputMethodService(), LifecycleOwner {
                     stopDelRepeat()
                     undo.clear()
                     accum = 0f
-                    lastX = e.x
+                    downX = e.x
+                    lastX = downX
                     lastTime = e.eventTime
+                    moved = false
                     deleteGestureActive = true
                     delView = v
                     v.alpha = 0.6f
                     deleteUnit()?.let { undo.add(it) }
+                    val repeat = object : Runnable {
+                        override fun run() {
+                            if (deleteGestureActive && delView === v && !moved) {
+                                val deleted = deleteUnit()
+                                if (deleted == null) {
+                                    delRepeatRun = null
+                                    return
+                                }
+                                undo.add(deleted)
+                                handler.postDelayed(this, 85)
+                            }
+                        }
+                    }
+                    delRepeatRun = repeat
+                    handler.postDelayed(repeat, ViewConfiguration.getLongPressTimeout().toLong())
                 }
                 MotionEvent.ACTION_MOVE -> {
                     if (!deleteGestureActive) return@setOnTouchListener true
+                    if (!moved && abs(e.x - downX) > touchSlop) {
+                        moved = true
+                        delRepeatRun?.let { handler.removeCallbacks(it) }
+                        delRepeatRun = null
+                    }
                     val dx = e.x - lastX
                     val dt = (e.eventTime - lastTime).coerceAtLeast(1L).toFloat()
                     lastX = e.x
@@ -1630,6 +1659,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         ocrSeen.clear()
         scanStart = SystemClock.elapsedRealtime()
         lastOcr = 0L
+        lastLookupHint = 0L
         setHint("把條碼對準畫面")
         if (outName) Thread { ProductDb.count(this) }.start()
         registry.currentState = Lifecycle.State.STARTED
@@ -1673,32 +1703,41 @@ class ImeService : InputMethodService(), LifecycleOwner {
         val input = InputImage.fromMediaImage(img, proxy.imageInfo.rotationDegrees)
         scanner.process(input)
             .addOnSuccessListener { list ->
-                val v = list.firstNotNullOfOrNull { it.rawValue }
                 val now = SystemClock.elapsedRealtime()
+                val values = list.mapNotNull { it.rawValue?.trim()?.takeIf { value -> value.isNotEmpty() } }
+                // 品名模式不要接受畫面上的第一個隨機碼；同一畫面逐一比對，找到商品庫中的完整條碼才完成。
+                val v = if (outName) values.firstOrNull { ProductDb.lookup(this, it) != null }
+                        else values.firstOrNull()
                 if (v != null) {
                     accept(v)
                     proxy.close()
-                } else if (scanning && !scanDone && now - scanStart > 2000 && now - lastOcr > 350) {
-                    // 條碼掃不到：自動改為辨識「條碼正下方」印的數字
-                    lastOcr = now
-                    setHint("掃不到條碼，正在辨識條碼下方的數字…")
-                    val bmp = try {
-                        val raw = proxy.toBitmap()
-                        val deg = proxy.imageInfo.rotationDegrees
-                        if (deg == 0) raw
-                        else Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, Matrix().apply { postRotate(deg.toFloat()) }, true)
-                    } catch (e: Exception) {
-                        null
-                    }
-                    if (bmp == null) {
-                        proxy.close()
-                    } else {
-                        ocr.process(InputImage.fromBitmap(bmp, 0))
-                            .addOnSuccessListener { t -> handleOcr(t, bmp) }
-                            .addOnCompleteListener { proxy.close() }
-                    }
                 } else {
-                    proxy.close()
+                    if (outName && values.isNotEmpty() && now - lastLookupHint > 2000) {
+                        lastLookupHint = now
+                        setHint("讀到條碼但商品庫未命中，請對準商品條碼；繼續掃描中…")
+                    }
+                    if (scanning && !scanDone && now - scanStart > 2000 && now - lastOcr > 350) {
+                        // 條碼掃不到或目前讀到的條碼未命中：仍嘗試辨識「條碼正下方」印的完整數字
+                        lastOcr = now
+                        if (values.isEmpty()) setHint("掃不到條碼，正在辨識條碼下方的數字…")
+                        val bmp = try {
+                            val raw = proxy.toBitmap()
+                            val deg = proxy.imageInfo.rotationDegrees
+                            if (deg == 0) raw
+                            else Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, Matrix().apply { postRotate(deg.toFloat()) }, true)
+                        } catch (e: Exception) {
+                            null
+                        }
+                        if (bmp == null) {
+                            proxy.close()
+                        } else {
+                            ocr.process(InputImage.fromBitmap(bmp, 0))
+                                .addOnSuccessListener { t -> handleOcr(t, bmp) }
+                                .addOnCompleteListener { proxy.close() }
+                        }
+                    } else {
+                        proxy.close()
+                    }
                 }
             }
             .addOnFailureListener { proxy.close() }
@@ -1753,6 +1792,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         for (c in cands) {
             if (c.text.length !in 8..14) continue
             if (!barcodeAbove(bmp, c.r)) continue
+            if (outName && ProductDb.lookup(this, c.text) == null) continue
             val ok = gs1Ok(c.text)
             val n = (ocrSeen[c.text] ?: 0) + 1
             ocrSeen[c.text] = n

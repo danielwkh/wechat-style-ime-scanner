@@ -29,10 +29,14 @@ object ProductDb {
     )
 
     private val CODE_KEYS = listOf(
-        "條碼", "条码", "條形碼", "条形码", "barcode", "bar code", "ean", "upc", "gtin", "國際碼", "国际码"
+        "商品條碼", "商品条码", "產品條碼", "产品条码", "國際條碼", "国际条码", "條形碼", "条形码",
+        "條碼", "条码", "條碼值", "条码值", "barcode", "bar code", "ean", "upc", "gtin",
+        "商品編碼", "商品编码", "貨品編碼", "货品编码", "國際碼", "国际码"
     )
     private val NAME_KEYS = listOf(
-        "名稱", "名称", "品名", "商品名", "產品名", "产品名", "貨名", "货名", "name", "description", "item", "product"
+        "商品名稱", "商品名称", "產品名稱", "产品名称", "貨品名稱", "货品名称", "貨物名稱", "货物名称",
+        "品項名稱", "品项名称", "品項", "品项", "產品名", "产品名", "商品名", "品名", "貨名", "货名", "名稱", "名称",
+        "productname", "itemname", "name", "description", "title", "product", "item"
     )
 
     private fun file(ctx: Context) = File(ctx.filesDir, "products.tsv")
@@ -61,17 +65,12 @@ object ProductDb {
 
     fun count(ctx: Context): Int = get(ctx).size
 
-    /**
-     * 查商品名。依序嘗試：完全相同 → 只留數字 → 掃到的碼多／少一位校驗碼（商品庫是 12 位、掃到 13 位等情形）。
-     */
+    /** 以完整條碼精確查找商品名稱；只統一數字形式與前導零，不用短碼前綴猜測商品。 */
     fun lookup(ctx: Context, code: String): String? {
         val m = get(ctx)
         val digits = code.filter { it.isDigit() }
         val k = norm(digits.ifEmpty { code })
-        m[k]?.let { return it }
-        if (k.length > 6) m[norm(k.dropLast(1))]?.let { return it }   // 掃到的有校驗碼、庫裡沒有
-        val kk = k
-        return m.entries.firstOrNull { (key, _) -> key.length > 6 && key.length == kk.length + 1 && key.startsWith(kk) }?.value
+        return m[k]
     }
 
     /** 用工作表前幾十列判斷哪些欄是條碼、哪一欄是名稱；找不到就回傳 null。 */
@@ -92,7 +91,8 @@ object ProductDb {
 
         fun labelOf(c: Int) = header.getOrNull(c)?.takeIf { it.isNotBlank() } ?: "第${c + 1}欄"
 
-        val codeCols = ArrayList<Int>()
+        val explicitCodeCols = ArrayList<Int>()
+        val inferredCodeCols = ArrayList<Int>()
         var nameCol = -1
         var nameScore = -1.0
         for (c in 0 until ncols) {
@@ -104,9 +104,14 @@ object ProductDb {
             val avgLen = if (v.isEmpty()) 0.0 else v.map { it.length }.average()
 
             val headerHit = CODE_KEYS.any { label.contains(it) }
-            val isCodeCol = if (headerHit) (v.isEmpty() || codeRatio >= 0.5) else (v.size >= 3 && codeRatio >= 0.8)
-            if (isCodeCol) {
-                codeCols.add(c)
+            val isExplicitCode = headerHit && (v.isEmpty() || codeRatio >= 0.5)
+            val isInferredCode = !headerHit && v.size >= 3 && codeRatio >= 0.8
+            if (isExplicitCode) {
+                explicitCodeCols.add(c)
+                continue
+            }
+            if (isInferredCode) {
+                inferredCodeCols.add(c)
                 continue
             }
             if (v.isNotEmpty() && textRatio >= 0.6) {
@@ -117,6 +122,7 @@ object ProductDb {
                 if (score > nameScore) { nameScore = score; nameCol = c }
             }
         }
+        val codeCols = if (explicitCodeCols.isNotEmpty()) explicitCodeCols else inferredCodeCols
         if (codeCols.isEmpty() || nameCol < 0) return null
         return Plan(
             entry, codeCols, nameCol,
