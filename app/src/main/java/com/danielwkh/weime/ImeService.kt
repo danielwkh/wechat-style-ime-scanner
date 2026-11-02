@@ -802,13 +802,13 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
         for ((i, r) in rows.withIndex()) {
             val line = LinearLayout(this)
-            if (i == 1 && mode != 2) add(line, View(this), 0.5f)
+            if (i == 1 && mode != 2) add(line, View(this), 0.5f, -1)
             if (i == 2) {
                 if (mode == 1) add(line, cell("⇧", 18f, if (shift) "#FFFFFF" else "#D0D0D0") {
                     shift = !shift
                     render()
-                }, 1.5f)
-                else add(line, View(this), 1.5f)
+                }, 1.5f, -1)
+                else add(line, View(this), 1.5f, -1)
             }
             for (ch in r) {
                 val cjKeys = mode == 0 && scheme != 0
@@ -820,25 +820,26 @@ class ImeService : InputMethodService(), LifecycleOwner {
                         cell(label, 20f, "#FFFFFF") { onChar(ch) }
                     }
                 }
-                add(line, key, 1f)
+                add(line, key, 1f, -1)
             }
-            if (i == 1 && mode != 2) add(line, View(this), 0.5f)
-            if (i == 2) add(line, delKey(), 1.5f)   // 刪除鍵固定在第三行最右邊
-            keyArea.addView(line)
+            if (i == 1 && mode != 2) add(line, View(this), 0.5f, -1)
+            if (i == 2) add(line, delKey(), 1.5f, -1)   // 刪除鍵固定在第三行最右邊
+            // 以剩餘高度平均分配各列，避免固定鍵高令速成/倉頡第三排被底列裁掉。
+            keyArea.addView(line, LinearLayout.LayoutParams(-1, 0, 1f))
         }
 
         val b = LinearLayout(this)
         if (mode == 1) {
             add(b, cell("123", 14f, "#D0D0D0") {
                 lastLetterMode = mode; mode = 3; render()
-            }, 1.15f)
-            add(b, cell("😀", 18f, "#D0D0D0") { openEmojiPanel(1) }, 0.8f)
-            add(b, cell(",", 20f, "#FFFFFF") { commit(",") }, 0.7f)
-            add(b, spaceKey("🎙", { commit(" ") }), 3.5f)
-            add(b, cell("英", 15f, "#D0D0D0") { mode = 0; scheme = enabledSchemes()[0]; shift = false; render() }, 1f)
-            add(b, cell("換行", 15f, "#07C160", Color.WHITE) { onEnter() }, 1.35f)
+            }, 1.15f, -1)
+            add(b, cell("😀", 18f, "#D0D0D0") { openEmojiPanel(1) }, 0.8f, -1)
+            add(b, cell(",", 20f, "#FFFFFF") { commit(",") }, 0.7f, -1)
+            add(b, spaceKey("🎙", { commit(" ") }), 3.5f, -1)
+            add(b, cell("英", 15f, "#D0D0D0") { mode = 0; scheme = enabledSchemes()[0]; shift = false; render() }, 1f, -1)
+            add(b, cell("換行", 15f, "#07C160", Color.WHITE) { onEnter() }, 1.35f, -1)
         } else if (mode == 2) {
-            add(b, cell("ABC", 15f, "#D0D0D0") { mode = lastLetterMode; render(); showCands() }, 1.5f)
+            add(b, cell("ABC", 15f, "#D0D0D0") { mode = lastLetterMode; render(); showCands() }, 1.5f, -1)
         } else {
             add(b, cell("符", 15f, "#D0D0D0") {
                 commitAll()
@@ -846,27 +847,27 @@ class ImeService : InputMethodService(), LifecycleOwner {
                 mode = 2
                 shift = false
                 render()
-            }, 1.2f)
+            }, 1.2f, -1)
             add(b, cell(if (mode == 0) arrayOf("拼", "速", "倉", "筆")[scheme] else "EN", 15f, "#D0D0D0") {
                 cycleLang()
-            }, 1.2f)
+            }, 1.2f, -1)
         }
         val comma = if (zh) "，" else ","
         val period = if (zh) "。" else "."
         if (mode != 1) {
-            add(b, cell(comma, 20f, "#FFFFFF") { onPunc(comma) }, 1f)
-            add(b, spaceKey("空格"), 3f)
-            add(b, cell(period, 20f, "#FFFFFF") { onPunc(period) }, 1f)
+            add(b, cell(comma, 20f, "#FFFFFF") { onPunc(comma) }, 1f, -1)
+            add(b, spaceKey("空格"), 3f, -1)
+            add(b, cell(period, 20f, "#FFFFFF") { onPunc(period) }, 1f, -1)
             add(b, cell("123", 15f, "#D0D0D0") {
                 commitAll()
                 if (mode < 2) lastLetterMode = mode
                 mode = 3
                 shift = false
                 render()
-            }, 1.2f)
-            add(b, cell("⏎", 18f, "#07C160", Color.WHITE) { onEnter() }, 1.5f)
+            }, 1.2f, -1)
+            add(b, cell("⏎", 18f, "#07C160", Color.WHITE) { onEnter() }, 1.5f, -1)
         }
-        keyArea.addView(b)
+        keyArea.addView(b, LinearLayout.LayoutParams(-1, 0, 1f))
     }
 
     /** 九宮格數字鍵盤：左邊常用標點，中間 1-9 + 0，右邊刪除／空格／確定。 */
