@@ -604,6 +604,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
             var accX = 0f
             var accY = 0f
             var choiceIndex = 0
+            var altTriggered = false
             var popup: android.widget.PopupWindow? = null
             var primaryOption: TextView? = null
             var secondaryOption: TextView? = null
@@ -652,6 +653,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
                     MotionEvent.ACTION_DOWN -> {
                         touching = true
                         draggingCursor = false
+                        altTriggered = false
                         kbRoot.suppress = true
                         downX = e.x; downY = e.y; lastX = e.x; lastY = e.y
                         choiceIndex = 0
@@ -659,7 +661,16 @@ class ImeService : InputMethodService(), LifecycleOwner {
                         handler.postDelayed(showChoiceRun, ViewConfiguration.getLongPressTimeout().toLong())
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        if (popup != null) {
+                        if (secondary.isNotEmpty() && !altTriggered && downY - e.y > dp(12)) {
+                            handler.removeCallbacks(showChoiceRun)
+                            popup?.dismiss(); popup = null
+                            altTriggered = true
+                            if (mode == 0) commitAll()
+                            commit(secondary)
+                            saveState()
+                        } else if (altTriggered) {
+                            // 數字／符號已輸出；繼續移動不啟動游標拖動。
+                        } else if (popup != null) {
                             updateChoice(e.rawX)
                         } else if (!draggingCursor && (abs(e.x - downX) > ViewConfiguration.get(this@ImeService).scaledTouchSlop || abs(e.y - downY) > ViewConfiguration.get(this@ImeService).scaledTouchSlop)) {
                             handler.removeCallbacks(showChoiceRun)
@@ -682,7 +693,14 @@ class ImeService : InputMethodService(), LifecycleOwner {
                     }
                     MotionEvent.ACTION_UP -> {
                         handler.removeCallbacks(showChoiceRun)
-                        if (popup != null) {
+                        if (secondary.isNotEmpty() && !altTriggered && downY - e.y > dp(12)) {
+                            popup?.dismiss(); popup = null
+                            if (mode == 0) commitAll()
+                            commit(secondary)
+                            saveState()
+                        } else if (altTriggered) {
+                            popup?.dismiss(); popup = null
+                        } else if (popup != null) {
                             updateChoice(e.rawX)
                             popup?.dismiss(); popup = null
                             if (choiceIndex == 0 && mode == 1) {
@@ -701,6 +719,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
                             saveState()
                         }
                         touching = false
+                        altTriggered = false
                         kbRoot.suppress = false
                         primaryOption = null; secondaryOption = null
                     }
@@ -760,7 +779,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
                     handler.postDelayed(voiceRun, ViewConfiguration.getLongPressTimeout().toLong())
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (altDigit != null && !voiceHold && !altTriggered && downY - e.y > ViewConfiguration.get(this).scaledTouchSlop) {
+                    if (altDigit != null && !voiceHold && !altTriggered && downY - e.y > dp(12)) {
                         handler.removeCallbacks(voiceRun)
                         altTriggered = true
                         commit(altDigit.toString())
@@ -786,6 +805,11 @@ class ImeService : InputMethodService(), LifecycleOwner {
                 }
                 MotionEvent.ACTION_UP -> {
                     handler.removeCallbacks(voiceRun)
+                    if (altDigit != null && !voiceHold && !altTriggered && downY - e.y > dp(12)) {
+                        altTriggered = true
+                        commit(altDigit.toString())
+                        saveState()
+                    }
                     if (voiceHold) {
                         if (recording) stopVoice(false)
                     } else if (cursorDrag) keyArea.alpha = 1f else if (!altTriggered) shortAction()
@@ -1007,15 +1031,27 @@ class ImeService : InputMethodService(), LifecycleOwner {
         render()
     }
 
-    /** 筆畫鍵盤保留原配置；主要按鍵另標 1–9，空格鍵標 0，數字鍵盤本身不變。 */
+    /** 筆畫鍵盤左側標點可上下拖動並慣性滑動；主要按鍵另標 1–9，空格鍵標 0。 */
     private fun strokePage(): View {
         val wrap = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun sideKey(col: LinearLayout, label: String, action: () -> Unit) {
             col.addView(cell(label, 17f, "#343638", Color.WHITE, action),
                 LinearLayout.LayoutParams(-1, 0, 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) })
         }
-        val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        listOf("7", "?", "+", "\\").forEach { s -> sideKey(left, s) { onPunc(s) } }
+        val punctuation = strokePunctuation()
+        val punctuationList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        for (symbol in punctuation) {
+            punctuationList.addView(cell(symbol, 19f, "#343638", Color.WHITE) { onPunc(symbol) },
+                LinearLayout.LayoutParams(-1, dp(38)).apply { setMargins(dp(3), dp(2), dp(3), dp(2)) })
+        }
+        punctuationList.addView(cell("自訂", 14f, "#343638", Color.WHITE) { chooseStrokePunctuation() },
+            LinearLayout.LayoutParams(-1, dp(38)).apply { setMargins(dp(3), dp(2), dp(3), dp(2)) })
+        val left = ScrollView(this).apply {
+            isFillViewport = true
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            addView(punctuationList, ScrollView.LayoutParams(-1, -2))
+        }
 
         val center = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         fun strokeRow(labels: List<Triple<String, Char, () -> Unit>>) {
@@ -1040,6 +1076,73 @@ class ImeService : InputMethodService(), LifecycleOwner {
         wrap.addView(center, LinearLayout.LayoutParams(0, dp(162), 3.5f))
         wrap.addView(right, LinearLayout.LayoutParams(0, dp(162), 0.85f))
         return wrap
+    }
+
+    private fun strokePunctuation(): List<String> {
+        val defaults = listOf("7", "?", "+", "\\", "/", "-", "(", ")", ":")
+        val selected = prefs.getStringSet("strokePunctuation", null) ?: return defaults
+        val ordered = listOf("7", "?", "+", "\\", "/", "-", "(", ")", ":", "!", "@", "#", "\$", "%", "&", "*", "=", "_", "'", "\"", ";", ",", ".", "，", "。", "？", "！", "、", "：", "；", "（", "）", "…", "～")
+        val result = ordered.filter { it in selected }.take(9)
+        return if (result.size == 9) result else defaults
+    }
+
+    private fun chooseStrokePunctuation() {
+        val symbols = listOf("7", "?", "+", "\\", "/", "-", "(", ")", ":", "!", "@", "#", "\$", "%", "&", "*", "=", "_", "'", "\"", ";", ",", ".", "，", "。", "？", "！", "、", "：", "；", "（", "）", "…", "～")
+        val selected = strokePunctuation().toMutableSet()
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+            setBackgroundColor(Color.parseColor("#202124"))
+        }
+        val title = TextView(this).apply {
+            textSize = 15f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), 0, dp(8), 0)
+        }
+        fun updateTitle() { title.text = "選擇9個常用標點（${selected.size}/9）" }
+        updateTitle()
+        root.addView(title, LinearLayout.LayoutParams(-1, dp(42)))
+
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        for (symbol in symbols) {
+            val item = android.widget.CheckBox(this).apply {
+                text = symbol
+                textSize = 18f
+                setTextColor(Color.WHITE)
+                buttonTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#07C160"))
+                isChecked = symbol in selected
+                setPadding(dp(10), 0, dp(8), 0)
+                setOnCheckedChangeListener { _, checked ->
+                    if (checked && symbol !in selected && selected.size >= 9) {
+                        isChecked = false
+                        Toast.makeText(this@ImeService, "最多選擇9個標點", Toast.LENGTH_SHORT).show()
+                    } else if (checked) selected.add(symbol) else selected.remove(symbol)
+                    updateTitle()
+                }
+            }
+            list.addView(item, LinearLayout.LayoutParams(-1, dp(40)))
+        }
+        val scroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            addView(list, ScrollView.LayoutParams(-1, -2))
+        }
+        root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        val footer = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        footer.addView(cell("取消", 14f, "#343638", Color.WHITE) { closePanel() },
+            LinearLayout.LayoutParams(0, dp(42), 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) })
+        footer.addView(cell("完成", 14f, "#07C160", Color.WHITE) {
+            if (selected.size != 9) {
+                Toast.makeText(this, "請剛好選擇9個標點", Toast.LENGTH_SHORT).show()
+            } else {
+                prefs.edit().putStringSet("strokePunctuation", selected.toSet()).apply()
+                closePanel()
+                render()
+            }
+        }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) })
+        root.addView(footer, LinearLayout.LayoutParams(-1, dp(48)))
+        openPanel(root)
     }
 
     private fun strokeBottomRow(): View {
