@@ -825,8 +825,8 @@ class ImeService : InputMethodService(), LifecycleOwner {
             }
             if (i == 1 && mode != 2) add(line, View(this), 0.5f, -1)
             if (i == 2) add(line, delKey(), 1.5f, -1)   // 刪除鍵固定在第三行最右邊
-            // 以剩餘高度平均分配各列，避免固定鍵高令速成/倉頡第三排被底列裁掉。
-            keyArea.addView(line, LinearLayout.LayoutParams(-1, 0, 1f))
+            // 固定每排高度，避免一般字母鍵盤隨輸入視窗可用高度而被垂直拉伸。
+            keyArea.addView(line, LinearLayout.LayoutParams(-1, dp(50)))
         }
 
         val b = LinearLayout(this)
@@ -868,7 +868,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
             }, 1.2f, -1)
             add(b, cell("⏎", 18f, "#07C160", Color.WHITE) { onEnter() }, 1.5f, -1)
         }
-        keyArea.addView(b, LinearLayout.LayoutParams(-1, 0, 1f))
+        keyArea.addView(b, LinearLayout.LayoutParams(-1, dp(50)))
     }
 
     /** 九宮格數字鍵盤：左邊常用標點，中間 1-9 + 0，右邊刪除／空格／確定。 */
