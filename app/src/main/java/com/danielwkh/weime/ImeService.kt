@@ -1278,7 +1278,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         return row
     }
 
-    /** 筆畫鍵：短按保留原功能；長按或碰鍵即向上掃，輸出右上角副標數字。 */
+    /** 筆畫鍵：短按保留原功能；左右拖動移動游標；長按或向上掃輸出副標數字。 */
     private fun strokeDigitKey(label: String, digit: Char, shortAction: () -> Unit): View {
         val key = FrameLayout(this).apply {
             background = GradientDrawable().apply {
@@ -1302,7 +1302,12 @@ class ImeService : InputMethodService(), LifecycleOwner {
         var touching = false
         var triggered = false
         var moved = false
+        var cursorDrag = false
+        var downX = 0f
         var downY = 0f
+        var lastX = 0f
+        var accX = 0f
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
         val longRun = Runnable {
             if (touching) {
                 triggered = true
@@ -1316,32 +1321,61 @@ class ImeService : InputMethodService(), LifecycleOwner {
                     touching = true
                     triggered = false
                     moved = false
+                    cursorDrag = false
+                    downX = e.x
                     downY = e.y
+                    lastX = e.x
+                    accX = 0f
                     kbRoot.suppress = true
                     handler.removeCallbacks(longRun)
                     handler.postDelayed(longRun, ViewConfiguration.getLongPressTimeout().toLong())
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (!triggered && downY - e.y > ViewConfiguration.get(this).scaledTouchSlop) {
+                    val dx = e.x - downX
+                    val dy = e.y - downY
+                    val horizontalDrag = abs(dx) > touchSlop && abs(dx) > abs(dy) * 1.2f
+                    val upSwipe = downY - e.y > touchSlop && downY - e.y > abs(dx) * 1.2f
+                    if (!triggered && !cursorDrag && horizontalDrag) {
+                        handler.removeCallbacks(longRun)
+                        moved = true
+                        cursorDrag = true
+                        cursorStart()
+                        accX = dx
+                        lastX = e.x
+                        while (accX >= dp(9)) { moveCursor(1, 0); accX -= dp(9) }
+                        while (accX <= -dp(9)) { moveCursor(-1, 0); accX += dp(9) }
+                    } else if (!triggered && !cursorDrag && upSwipe) {
                         handler.removeCallbacks(longRun)
                         triggered = true
                         commit(digit.toString())
                         saveState()
-                    } else if (abs(e.y - downY) > ViewConfiguration.get(this).scaledTouchSlop || abs(e.x - key.width / 2f) > key.width / 2f) {
+                    } else if (cursorDrag) {
+                        accX += e.x - lastX
+                        lastX = e.x
+                        while (accX >= dp(9)) { moveCursor(1, 0); accX -= dp(9) }
+                        while (accX <= -dp(9)) { moveCursor(-1, 0); accX += dp(9) }
+                    } else if (abs(dy) > touchSlop || abs(dx) > key.width / 2f) {
                         moved = true
                         handler.removeCallbacks(longRun)
                     }
                 }
                 MotionEvent.ACTION_UP -> {
                     handler.removeCallbacks(longRun)
-                    if (!triggered && !moved) shortAction()
+                    if (cursorDrag) {
+                        keyArea.alpha = 1f
+                    } else if (!triggered && !moved) {
+                        shortAction()
+                    }
                     touching = false
+                    cursorDrag = false
                     kbRoot.suppress = false
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     handler.removeCallbacks(longRun)
                     touching = false
+                    cursorDrag = false
                     kbRoot.suppress = false
+                    keyArea.alpha = 1f
                 }
             }
             true
