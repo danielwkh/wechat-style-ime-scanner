@@ -1050,7 +1050,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
             isFillViewport = true
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
-            addView(punctuationList, ScrollView.LayoutParams(-1, -2))
+            addView(punctuationList, FrameLayout.LayoutParams(-1, -2))
         }
 
         val center = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -1125,7 +1125,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         }
         val scroll = ScrollView(this).apply {
             isVerticalScrollBarEnabled = false
-            addView(list, ScrollView.LayoutParams(-1, -2))
+            addView(list, FrameLayout.LayoutParams(-1, -2))
         }
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
 
