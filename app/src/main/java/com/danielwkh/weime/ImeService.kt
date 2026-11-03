@@ -717,29 +717,48 @@ class ImeService : InputMethodService(), LifecycleOwner {
         }
     }
 
-    /** 短按輸入空格；長按直接打開離線語音並開始錄音。 */
-    private fun spaceKey(label: String, shortAction: () -> Unit = { onSpace() }): View {
-        val v = cell(label, 16f, "#4A4A4A", Color.WHITE, shortAction)
+    /** 短按輸入空格；可選擇在此鍵增加副標數字，長按或向上掃輸出數字。 */
+    private fun spaceKey(label: String, shortAction: () -> Unit = { onSpace() }, altDigit: Char? = null): View {
+        val base = cell(label, 16f, "#4A4A4A", Color.WHITE, shortAction)
+        val v: View = if (altDigit == null) base else FrameLayout(this).apply {
+            // 外層接管觸控，以便同一空格鍵支援長按與上滑數字；短按動作在 ACTION_UP 執行。
+            base.setOnClickListener(null)
+            addView(base, FrameLayout.LayoutParams(-1, -1))
+            addView(TextView(this@ImeService).apply {
+                text = altDigit.toString()
+                textSize = 10f
+                setTextColor(Color.LTGRAY)
+                gravity = Gravity.TOP or Gravity.END
+                setPadding(0, dp(4), dp(7), 0)
+            }, FrameLayout.LayoutParams(-1, -1))
+        }
         var touching = false
         var voiceHold = false
         var cursorDrag = false
+        var altTriggered = false
         var downX = 0f; var downY = 0f; var lastX = 0f; var lastY = 0f
         var accX = 0f; var accY = 0f
         val voiceRun = Runnable {
             if (touching && !cursorDrag) {
-                voiceHold = true
-                startVoice()
-                handler.postDelayed({
-                    if (touching && voiceHold && ::extraPanel.isInitialized && extraPanel.visibility == View.VISIBLE && voiceBtn != null && !recording && !voiceBusy) {
-                        startRecording()
-                    }
-                }, 120)
+                if (altDigit != null) {
+                    altTriggered = true
+                    commit(altDigit.toString())
+                    saveState()
+                } else {
+                    voiceHold = true
+                    startVoice()
+                    handler.postDelayed({
+                        if (touching && voiceHold && ::extraPanel.isInitialized && extraPanel.visibility == View.VISIBLE && voiceBtn != null && !recording && !voiceBusy) {
+                            startRecording()
+                        }
+                    }, 120)
+                }
             }
         }
         v.setOnTouchListener { _, e ->
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    touching = true; voiceHold = false; cursorDrag = false
+                    touching = true; voiceHold = false; cursorDrag = false; altTriggered = false
                     kbRoot.suppress = true
                     downX = e.x; downY = e.y; lastX = e.x; lastY = e.y
                     accX = 0f; accY = 0f
@@ -747,7 +766,12 @@ class ImeService : InputMethodService(), LifecycleOwner {
                     handler.postDelayed(voiceRun, ViewConfiguration.getLongPressTimeout().toLong())
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (!voiceHold && !cursorDrag && (abs(e.x - downX) > ViewConfiguration.get(this).scaledTouchSlop || abs(e.y - downY) > ViewConfiguration.get(this).scaledTouchSlop)) {
+                    if (altDigit != null && !altTriggered && downY - e.y > ViewConfiguration.get(this).scaledTouchSlop) {
+                        handler.removeCallbacks(voiceRun)
+                        altTriggered = true
+                        commit(altDigit.toString())
+                        saveState()
+                    } else if (!altTriggered && !voiceHold && !cursorDrag && (abs(e.x - downX) > ViewConfiguration.get(this).scaledTouchSlop || abs(e.y - downY) > ViewConfiguration.get(this).scaledTouchSlop)) {
                         handler.removeCallbacks(voiceRun)
                         cursorDrag = true
                         cursorStart()
@@ -770,13 +794,13 @@ class ImeService : InputMethodService(), LifecycleOwner {
                     handler.removeCallbacks(voiceRun)
                     if (voiceHold) {
                         if (recording) stopVoice(false)
-                    } else if (cursorDrag) keyArea.alpha = 1f else shortAction()
-                    touching = false; voiceHold = false; kbRoot.suppress = false
+                    } else if (cursorDrag) keyArea.alpha = 1f else if (!altTriggered) shortAction()
+                    touching = false; voiceHold = false; altTriggered = false; kbRoot.suppress = false
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     handler.removeCallbacks(voiceRun)
                     if (voiceHold) stopVoice(true)
-                    touching = false; voiceHold = false; cursorDrag = false; kbRoot.suppress = false
+                    touching = false; voiceHold = false; cursorDrag = false; altTriggered = false; kbRoot.suppress = false
                     keyArea.alpha = 1f
                 }
             }
@@ -989,7 +1013,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         render()
     }
 
-    /** 筆劃鍵盤：橫、豎、撇、點、折五個筆劃鍵 + 清除 + 常用標點；刪除鍵在右邊。 */
+    /** 筆畫鍵盤保留原配置；主要按鍵另標 1–9，空格鍵標 0，數字鍵盤本身不變。 */
     private fun strokePage(): View {
         val wrap = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun sideKey(col: LinearLayout, label: String, action: () -> Unit) {
@@ -1000,17 +1024,17 @@ class ImeService : InputMethodService(), LifecycleOwner {
         listOf("7", "?", "+", "\\").forEach { s -> sideKey(left, s) { onPunc(s) } }
 
         val center = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        fun strokeRow(labels: List<Pair<String, () -> Unit>>) {
+        fun strokeRow(labels: List<Triple<String, Char, () -> Unit>>) {
             val row = LinearLayout(this@ImeService)
-            for ((label, action) in labels) {
-                row.addView(cell(label, if (label.length > 2) 18f else 25f, "#4A4A4A", Color.WHITE, action),
+            for ((label, digit, action) in labels) {
+                row.addView(strokeDigitKey(label, digit, action),
                     LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(3), dp(3), dp(3), dp(3)) })
             }
             center.addView(row, LinearLayout.LayoutParams(-1, 0, 1f))
         }
-        strokeRow(listOf("一" to { onChar('h') }, "丨" to { onChar('s') }, "丿" to { onChar('p') }))
-        strokeRow(listOf("丶" to { onChar('n') }, "乙" to { onChar('z') }, "＊" to { onPunc("＊") }))
-        strokeRow(listOf("@#" to { commitAll(); mode = 2; render() }, "，" to { onPunc("，") }, "ABC" to { commitAll(); lastLetterMode = 1; mode = 1; shift = false; render() }))
+        strokeRow(listOf(Triple("一", '1', { onChar('h') }), Triple("丨", '2', { onChar('s') }), Triple("丿", '3', { onChar('p') })))
+        strokeRow(listOf(Triple("丶", '4', { onChar('n') }), Triple("乙", '5', { onChar('z') }), Triple("＊", '6', { onPunc("＊") })))
+        strokeRow(listOf(Triple("@#", '7', { commitAll(); mode = 2; render() }), Triple("，", '8', { onPunc("，") }), Triple("ABC", '9', { commitAll(); lastLetterMode = 1; mode = 1; shift = false; render() })))
 
         val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         right.addView(delKey(), LinearLayout.LayoutParams(-1, 0, 1f).apply {
@@ -1028,10 +1052,81 @@ class ImeService : InputMethodService(), LifecycleOwner {
         val row = LinearLayout(this)
         add(row, cell("符號", 14f, "#343638") { commitAll(); mode = 2; render() }, 1.15f)
         add(row, cell("123", 14f, "#343638") { commitAll(); lastLetterMode = 0; mode = 3; render() }, 1f)
-        add(row, spaceKey("🎙", { onSpace() }), 3.4f)
+        add(row, spaceKey("🎙", { onSpace() }, altDigit = '0'), 3.4f)
         add(row, cell("筆", 16f, "#343638") { cycleLang() }, 1f)
         add(row, cell("換行", 14f, "#07C160", Color.WHITE) { onEnter() }, 1.2f)
         return row
+    }
+
+    /** 筆畫鍵：短按保留原功能；長按或碰鍵即向上掃，輸出右上角副標數字。 */
+    private fun strokeDigitKey(label: String, digit: Char, shortAction: () -> Unit): View {
+        val key = FrameLayout(this).apply {
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#4A4A4A"))
+                cornerRadius = dp(6).toFloat()
+            }
+            addView(TextView(this@ImeService).apply {
+                text = label
+                textSize = if (label.length > 2) 18f else 25f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+            }, FrameLayout.LayoutParams(-1, -1))
+            addView(TextView(this@ImeService).apply {
+                text = digit.toString()
+                textSize = 10f
+                setTextColor(Color.LTGRAY)
+                gravity = Gravity.TOP or Gravity.END
+                setPadding(0, dp(4), dp(7), 0)
+            }, FrameLayout.LayoutParams(-1, -1))
+        }
+        var touching = false
+        var triggered = false
+        var moved = false
+        var downY = 0f
+        val longRun = Runnable {
+            if (touching) {
+                triggered = true
+                commit(digit.toString())
+                saveState()
+            }
+        }
+        key.setOnTouchListener { _, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    touching = true
+                    triggered = false
+                    moved = false
+                    downY = e.y
+                    kbRoot.suppress = true
+                    handler.removeCallbacks(longRun)
+                    handler.postDelayed(longRun, ViewConfiguration.getLongPressTimeout().toLong())
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (!triggered && downY - e.y > ViewConfiguration.get(this).scaledTouchSlop) {
+                        handler.removeCallbacks(longRun)
+                        triggered = true
+                        commit(digit.toString())
+                        saveState()
+                    } else if (abs(e.y - downY) > ViewConfiguration.get(this).scaledTouchSlop || abs(e.x - key.width / 2f) > key.width / 2f) {
+                        moved = true
+                        handler.removeCallbacks(longRun)
+                    }
+                }
+                MotionEvent.ACTION_UP -> {
+                    handler.removeCallbacks(longRun)
+                    if (!triggered && !moved) shortAction()
+                    touching = false
+                    kbRoot.suppress = false
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    handler.removeCallbacks(longRun)
+                    touching = false
+                    kbRoot.suppress = false
+                }
+            }
+            true
+        }
+        return key
     }
 
     private fun clearComp() {
