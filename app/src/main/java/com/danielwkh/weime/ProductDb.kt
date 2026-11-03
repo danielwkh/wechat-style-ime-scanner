@@ -3,6 +3,7 @@ package com.danielwkh.weime
 import android.content.Context
 import android.net.Uri
 import java.io.File
+import java.util.LinkedHashMap
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.util.zip.ZipFile
@@ -13,6 +14,8 @@ import java.util.zip.ZipFile
  */
 object ProductDb {
     @Volatile private var map: Map<String, String>? = null
+    data class Match(val code: String, val name: String)
+    private val matchCache = LinkedHashMap<String, List<Match>>()
 
     class ImportResult(
         val count: Int, val added: Int, val updated: Int, val skipped: Int,
@@ -38,15 +41,19 @@ object ProductDb {
         "品項名稱", "品项名称", "品項", "品项", "產品名", "产品名", "商品名", "品名", "貨名", "货名", "名稱", "名称",
         "productname", "itemname", "name", "description", "title", "product", "item"
     )
+    private val CODE_PATTERN = Regex("^(\\d{4,14})(?:-[1-4])?$")
 
     private fun file(ctx: Context) = File(ctx.filesDir, "products.tsv")
 
     fun hasDatabase(ctx: Context): Boolean = file(ctx).let { it.isFile && it.length() > 0L }
 
-    /** 去掉前導 0，避免 Excel 把 0123… 存成數字後對不上。 */
-    private fun norm(code: String) = code.trim().trimStart('0')
+    /** 移除前導零與明確的 -1/-2/-3/-4 變體尾碼，不刪一般條碼的最後一位。 */
+    private fun codeBase(raw: String): String? {
+        val match = CODE_PATTERN.matchEntire(raw.trim()) ?: return null
+        return match.groupValues[1].trimStart('0')
+    }
 
-    private fun isCode(v: String) = v.length in 6..14 && v.all { it.isDigit() }
+    private fun isCode(v: String) = codeBase(v) != null
     private fun isTextual(v: String) = v.any { it.isLetter() }
 
     private fun get(ctx: Context): Map<String, String> {
@@ -65,13 +72,32 @@ object ProductDb {
 
     fun count(ctx: Context): Int = get(ctx).size
 
-    /** 以完整條碼精確查找商品名稱；只統一數字形式與前導零，不用短碼前綴猜測商品。 */
-    fun lookup(ctx: Context, code: String): String? {
+    /** 完整碼優先；否則以至少 6 位連續數字做包含匹配，依品名去重供唯一命中或選擇。 */
+    fun findMatches(ctx: Context, code: String): List<Match> {
+        val rawDigits = code.filter { it.isDigit() }
+        if (rawDigits.length < 6) return emptyList()
+        synchronized(matchCache) { matchCache[rawDigits]?.let { return it } }
         val m = get(ctx)
-        val digits = code.filter { it.isDigit() }
-        val k = norm(digits.ifEmpty { code })
-        return m[k]
+        val normalized = (codeBase(code) ?: rawDigits).trimStart('0')
+        val exact = m[normalized]
+        val result = if (exact != null) {
+            listOf(Match(normalized, exact))
+        } else {
+            val byName = LinkedHashMap<String, Match>()
+            val queries = listOf(rawDigits, normalized).distinct().filter { it.length >= 6 }
+            for ((key, name) in m) {
+                if (queries.any { key.contains(it) }) byName.putIfAbsent(name, Match(key, name))
+            }
+            byName.values.sortedBy { it.name }
+        }
+        synchronized(matchCache) {
+            if (matchCache.size > 128) matchCache.clear()
+            matchCache[rawDigits] = result
+        }
+        return result
     }
+
+    fun lookup(ctx: Context, code: String): String? = findMatches(ctx, code).singleOrNull()?.name
 
     /** 用工作表前幾十列判斷哪些欄是條碼、哪一欄是名稱；找不到就回傳 null。 */
     private fun detect(entry: String, sample: List<List<String>>): Plan? {
@@ -164,8 +190,8 @@ object ProductDb {
                     if (name.isNotEmpty() && isTextual(name)) {
                         for (c in plan.codeCols) {
                             val code = r.getOrNull(c)?.trim().orEmpty()
-                            if (code.length >= 4 && code.all { it.isDigit() }) {
-                                val k = norm(code)
+                            val k = codeBase(code)
+                            if (k != null) {
                                 if (k.isEmpty() || !seen.add(k)) continue   // 同一檔案內重複的條碼只處理第一次
                                 val old = m[k]
                                 when {
@@ -189,6 +215,7 @@ object ProductDb {
                     Files.move(tmpOut.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
                 }
                 map = m
+                synchronized(matchCache) { matchCache.clear() }
                 ImportResult(m.size, added, updated, skipped, plan.codeLabels, plan.nameLabel)
             }
         } finally {

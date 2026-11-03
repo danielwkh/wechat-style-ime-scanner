@@ -162,6 +162,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private var camProvider: ProcessCameraProvider? = null
     @Volatile private var scanning = false
     @Volatile private var scanDone = false
+    private var choosingProduct = false
     private val ocr = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     private val ocrSeen = HashMap<String, Int>()
     private var scanStart = 0L
@@ -1643,6 +1644,11 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private fun toggleScan() { if (scanning) stopScan() else startScan() }
 
     private fun startScan() {
+        if (choosingProduct) {
+            choosingProduct = false
+            notice = false
+            showCands()
+        }
         commitAll()
         closePanel()
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
@@ -1706,11 +1712,14 @@ class ImeService : InputMethodService(), LifecycleOwner {
             .addOnSuccessListener { list ->
                 val now = SystemClock.elapsedRealtime()
                 val values = list.mapNotNull { it.rawValue?.trim()?.takeIf { value -> value.isNotEmpty() } }
-                // 品名模式不要接受畫面上的第一個隨機碼；同一畫面逐一比對，找到商品庫中的完整條碼才完成。
-                val v = if (outName) values.firstOrNull { ProductDb.lookup(this, it) != null }
-                        else values.firstOrNull()
+                // 品名模式逐一查找完整碼或至少六位的唯一/多候選片段。
+                val resolved = if (outName) values.asSequence()
+                    .map { it to ProductDb.findMatches(this, it) }
+                    .firstOrNull { it.second.isNotEmpty() } else null
+                val v = if (outName) resolved?.first else values.firstOrNull()
                 if (v != null) {
-                    accept(v)
+                    val matches = resolved?.second.orEmpty()
+                    if (outName && matches.size > 1) acceptChoices(v, matches) else accept(v)
                     proxy.close()
                 } else {
                     if (outName && values.isNotEmpty() && now - lastLookupHint > 2000) {
@@ -1750,11 +1759,52 @@ class ImeService : InputMethodService(), LifecycleOwner {
         handler.post { onScanned(v) }
     }
 
+    private fun acceptChoices(code: String, matches: List<ProductDb.Match>) {
+        if (scanDone || !scanning) return
+        scanDone = true
+        handler.post { showProductChoices(code, matches) }
+    }
+
+    private fun showProductChoices(code: String, matches: List<ProductDb.Match>) {
+        stopScan()
+        stopDelRepeat()
+        candBar.removeAllViews()
+        candBar.addView(TextView(this).apply {
+            text = "選擇商品："
+            textSize = 13f
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.CENTER
+            setPadding(dp(8), 0, dp(6), 0)
+        }, LinearLayout.LayoutParams(-2, dp(46)))
+        for (match in matches) {
+            candBar.addView(TextView(this).apply {
+                text = match.name
+                textSize = 15f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                setPadding(dp(12), 0, dp(12), 0)
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#343638"))
+                    cornerRadius = dp(6).toFloat()
+                }
+                setOnClickListener {
+                    choosingProduct = false
+                    notice = false
+                    showCands()
+                    onScanned(code, match.name)
+                }
+            }, LinearLayout.LayoutParams(-2, dp(42)).apply { setMargins(dp(3), dp(2), dp(3), dp(2)) })
+        }
+        choosingProduct = true
+        notice = true
+        updateTop()
+    }
+
     /**
      * 只接受「正上方有條碼」的數字行：
      * 1) 找出整行幾乎都是數字的文字行（同一水平帶的數字會合併，EAN-13 常被拆成 3 段）；
      * 2) 檢查該行正上方是不是一排垂直條紋（條碼）；
-     * 3) 8–14 位，校驗碼正確連續 2 次，或同樣內容連續 3 次才接受。
+     * 3) 6–14 位，候選片段需重複確認，以降低誤讀。
      */
     private fun handleOcr(t: Text, bmp: Bitmap) {
         if (scanDone || !scanning) return
@@ -1791,14 +1841,15 @@ class ImeService : InputMethodService(), LifecycleOwner {
         }
 
         for (c in cands) {
-            if (c.text.length !in 8..14) continue
+            if (c.text.length !in 6..14) continue
             if (!barcodeAbove(bmp, c.r)) continue
-            if (outName && ProductDb.lookup(this, c.text) == null) continue
+            val matches = if (outName) ProductDb.findMatches(this, c.text) else emptyList()
+            if (outName && matches.isEmpty()) continue
             val ok = gs1Ok(c.text)
             val n = (ocrSeen[c.text] ?: 0) + 1
             ocrSeen[c.text] = n
             if ((ok && n >= 2) || n >= 3) {
-                accept(c.text)
+                if (outName && matches.size > 1) acceptChoices(c.text, matches) else accept(c.text)
                 return
             }
         }
@@ -1863,12 +1914,13 @@ class ImeService : InputMethodService(), LifecycleOwner {
     }
 
     /** 掃到後：清除輸入框全部內容 → 貼上（數字或商品名）→ 執行輸入動作（Enter／搜尋／送出）。 */
-    private fun onScanned(code: String) {
+    private fun onScanned(code: String, selectedName: String? = null) {
         stopScan()
         stopDelRepeat()
-        var text = code
+        // 輸出碼照相機實際讀到的數字原樣輸出，不補足長度或改寫尾碼。
+        var text = code.filter { it.isDigit() }
         if (outName) {
-            val name = ProductDb.lookup(this, code)
+            val name = selectedName ?: ProductDb.lookup(this, code)
             if (name != null) text = name
             else notify(
                 if (ProductDb.count(this) == 0) "尚未匯入商品庫，已輸出數字"
