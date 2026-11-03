@@ -12,7 +12,7 @@ android {
         targetSdk = 34
         // 由 GitHub Actions 依標籤自動帶入；本機編譯用預設值
         versionCode = (project.findProperty("vc") as String?)?.toIntOrNull() ?: 20
-        versionName = (project.findProperty("vn") as String?) ?: "2.9.5"
+        versionName = (project.findProperty("vn") as String?) ?: "2.9.6"
         ndk { abiFilters.add("arm64-v8a") }
     }
     packaging { jniLibs { useLegacyPackaging = true } }

@@ -747,6 +747,8 @@ class ImeService : InputMethodService(), LifecycleOwner {
         val v: View = if (altDigit == null) base else FrameLayout(this).apply {
             // 外層接管觸控，以便同一空格鍵支援長按與上滑數字；短按動作在 ACTION_UP 執行。
             base.setOnClickListener(null)
+            base.isClickable = false
+            base.isLongClickable = false
             addView(base, FrameLayout.LayoutParams(-1, -1))
             addView(TextView(this@ImeService).apply {
                 text = altDigit.toString()
@@ -1154,12 +1156,14 @@ class ImeService : InputMethodService(), LifecycleOwner {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(8), 0, dp(8), 0)
         }
-        fun updateTitle() { title.text = "選擇9個常用標點（${selected.size}/9）" }
+        fun updateTitle() { title.text = "選擇9個常用標點（${selected.size}/9）　拖曳☷排序" }
         updateTitle()
         root.addView(title, LinearLayout.LayoutParams(-1, dp(42)))
 
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        for (symbol in strokePunctuationOptions) {
+        var rebuildList: () -> Unit = {}
+        fun makeRow(symbol: String, draggable: Boolean): View {
+            val row = FrameLayout(this).apply { tag = symbol }
             val item = android.widget.CheckBox(this).apply {
                 text = symbol
                 textSize = 18f
@@ -1171,13 +1175,77 @@ class ImeService : InputMethodService(), LifecycleOwner {
                     if (checked && symbol !in selected && selected.size >= 9) {
                         isChecked = false
                         Toast.makeText(this@ImeService, "最多選擇9個標點", Toast.LENGTH_SHORT).show()
-                    } else if (checked && symbol !in selected) selected.add(symbol)
-                    else if (!checked) selected.remove(symbol)
-                    updateTitle()
+                    } else if (checked && symbol !in selected) {
+                        selected.add(symbol)
+                        updateTitle()
+                        rebuildList()
+                    } else if (!checked && symbol in selected) {
+                        selected.remove(symbol)
+                        updateTitle()
+                        rebuildList()
+                    }
                 }
             }
-            list.addView(item, LinearLayout.LayoutParams(-1, dp(40)))
+            row.addView(item, FrameLayout.LayoutParams(-1, -1).apply {
+                setMargins(0, 0, dp(44), 0)
+            })
+            if (draggable) {
+                row.addView(TextView(this).apply {
+                    text = "☷"
+                    textSize = 22f
+                    setTextColor(Color.LTGRAY)
+                    gravity = Gravity.CENTER
+                    setOnTouchListener { _, event ->
+                        val parentScroll = list.parent as? ScrollView
+                        when (event.actionMasked) {
+                            MotionEvent.ACTION_DOWN -> {
+                                kbRoot.suppress = true
+                                parentScroll?.requestDisallowInterceptTouchEvent(true)
+                                true
+                            }
+                            MotionEvent.ACTION_MOVE -> {
+                                val current = list.indexOfChild(row)
+                                val selectedCount = selected.size
+                                if (current >= 0 && selectedCount > 1) {
+                                    val pointerY = row.top + event.y
+                                    val nearest = (0 until selectedCount).minByOrNull { index ->
+                                        val child = list.getChildAt(index)
+                                        abs(child.top + child.height / 2f - pointerY)
+                                    } ?: current
+                                    val target = nearest.coerceIn(0, selectedCount - 1)
+                                    if (target != current) {
+                                        list.removeViewAt(current)
+                                        list.addView(row, target)
+                                        val reordered = (0 until selectedCount).map {
+                                            list.getChildAt(it).tag as String
+                                        }
+                                        selected.clear()
+                                        selected.addAll(reordered)
+                                        updateTitle()
+                                    }
+                                }
+                                true
+                            }
+                            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                parentScroll?.requestDisallowInterceptTouchEvent(false)
+                                kbRoot.suppress = false
+                                true
+                            }
+                            else -> true
+                        }
+                    }
+                }, FrameLayout.LayoutParams(dp(44), -1, Gravity.END))
+            }
+            return row
         }
+        rebuildList = {
+            list.removeAllViews()
+            val order = selected + strokePunctuationOptions.filter { it !in selected }
+            for (symbol in order) {
+                list.addView(makeRow(symbol, symbol in selected), LinearLayout.LayoutParams(-1, dp(40)))
+            }
+        }
+        rebuildList()
         val scroll = ScrollView(this).apply {
             isVerticalScrollBarEnabled = false
             addView(list, FrameLayout.LayoutParams(-1, -2))
