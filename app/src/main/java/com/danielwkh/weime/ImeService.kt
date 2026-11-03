@@ -717,7 +717,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         }
     }
 
-    /** 短按輸入空格；可選擇在此鍵增加副標數字，長按或向上掃輸出數字。 */
+    /** 短按執行原功能；一般語音空格鍵長按啟動語音；副標數字鍵只在向上掃時輸出數字。 */
     private fun spaceKey(label: String, shortAction: () -> Unit = { onSpace() }, altDigit: Char? = null): View {
         val base = cell(label, 16f, "#4A4A4A", Color.WHITE, shortAction)
         val v: View = if (altDigit == null) base else FrameLayout(this).apply {
@@ -740,19 +740,13 @@ class ImeService : InputMethodService(), LifecycleOwner {
         var accX = 0f; var accY = 0f
         val voiceRun = Runnable {
             if (touching && !cursorDrag) {
-                if (altDigit != null) {
-                    altTriggered = true
-                    commit(altDigit.toString())
-                    saveState()
-                } else {
-                    voiceHold = true
-                    startVoice()
-                    handler.postDelayed({
-                        if (touching && voiceHold && ::extraPanel.isInitialized && extraPanel.visibility == View.VISIBLE && voiceBtn != null && !recording && !voiceBusy) {
-                            startRecording()
-                        }
-                    }, 120)
-                }
+                voiceHold = true
+                startVoice()
+                handler.postDelayed({
+                    if (touching && voiceHold && ::extraPanel.isInitialized && extraPanel.visibility == View.VISIBLE && voiceBtn != null && !recording && !voiceBusy) {
+                        startRecording()
+                    }
+                }, 120)
             }
         }
         v.setOnTouchListener { _, e ->
@@ -766,7 +760,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
                     handler.postDelayed(voiceRun, ViewConfiguration.getLongPressTimeout().toLong())
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (altDigit != null && !altTriggered && downY - e.y > ViewConfiguration.get(this).scaledTouchSlop) {
+                    if (altDigit != null && !voiceHold && !altTriggered && downY - e.y > ViewConfiguration.get(this).scaledTouchSlop) {
                         handler.removeCallbacks(voiceRun)
                         altTriggered = true
                         commit(altDigit.toString())
