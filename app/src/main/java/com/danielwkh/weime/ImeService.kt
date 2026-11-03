@@ -155,6 +155,11 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private lateinit var scanBtn: TextView
     private val handler = Handler(Looper.getMainLooper())
     private val prefs by lazy { getSharedPreferences("kb", Context.MODE_PRIVATE) }
+    private val strokePunctuationOptions = listOf(
+        "7", "?", "+", "\\", "/", "-", "(", ")", ":", "!", "@", "#", "\$", "%", "&", "*", "=", "_", "'", "\"", ";", ",", ".", "，", "。", "？", "！", "、", "：", "；", "（", "）", "…", "～"
+    )
+    private val strokePunctuationDefaults = strokePunctuationOptions.take(9)
+    private val strokePunctuationKey = "strokePunctuation"
 
     // 掃描相關
     private val scanner = BarcodeScanning.getClient()
@@ -757,6 +762,13 @@ class ImeService : InputMethodService(), LifecycleOwner {
         var altTriggered = false
         var downX = 0f; var downY = 0f; var lastX = 0f; var lastY = 0f
         var accX = 0f; var accY = 0f
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
+        val altSwipeDistance = maxOf(dp(16), touchSlop * 2)
+        fun isUpSwipe(e: MotionEvent): Boolean {
+            val dy = downY - e.y
+            val dx = abs(e.x - downX)
+            return dy > altSwipeDistance && dy > dx * 1.2f
+        }
         val voiceRun = Runnable {
             if (touching && !cursorDrag) {
                 voiceHold = true
@@ -779,7 +791,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
                     handler.postDelayed(voiceRun, ViewConfiguration.getLongPressTimeout().toLong())
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (altDigit != null && !voiceHold && !altTriggered && downY - e.y > dp(12)) {
+                    if (altDigit != null && !voiceHold && !altTriggered && isUpSwipe(e)) {
                         handler.removeCallbacks(voiceRun)
                         altTriggered = true
                         commit(altDigit.toString())
@@ -805,7 +817,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
                 }
                 MotionEvent.ACTION_UP -> {
                     handler.removeCallbacks(voiceRun)
-                    if (altDigit != null && !voiceHold && !altTriggered && downY - e.y > dp(12)) {
+                    if (altDigit != null && !voiceHold && !altTriggered && isUpSwipe(e)) {
                         altTriggered = true
                         commit(altDigit.toString())
                         saveState()
@@ -1046,7 +1058,20 @@ class ImeService : InputMethodService(), LifecycleOwner {
         }
         punctuationList.addView(cell("自訂", 14f, "#343638", Color.WHITE) { chooseStrokePunctuation() },
             LinearLayout.LayoutParams(-1, dp(38)).apply { setMargins(dp(3), dp(2), dp(3), dp(2)) })
-        val left = ScrollView(this).apply {
+        val left = object : ScrollView(this@ImeService) {
+            override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    // 讓清單完整接收拖曳，避免 KeyboardRoot 將其判定為游標拖動。
+                    kbRoot.suppress = true
+                }
+                val handled = super.dispatchTouchEvent(event)
+                if (event.actionMasked == MotionEvent.ACTION_UP ||
+                    event.actionMasked == MotionEvent.ACTION_CANCEL) {
+                    kbRoot.suppress = false
+                }
+                return handled
+            }
+        }.apply {
             isFillViewport = true
             isVerticalScrollBarEnabled = false
             overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
@@ -1079,16 +1104,45 @@ class ImeService : InputMethodService(), LifecycleOwner {
     }
 
     private fun strokePunctuation(): List<String> {
-        val defaults = listOf("7", "?", "+", "\\", "/", "-", "(", ")", ":")
-        val selected = prefs.getStringSet("strokePunctuation", null) ?: return defaults
-        val ordered = listOf("7", "?", "+", "\\", "/", "-", "(", ")", ":", "!", "@", "#", "\$", "%", "&", "*", "=", "_", "'", "\"", ";", ",", ".", "，", "。", "？", "！", "、", "：", "；", "（", "）", "…", "～")
-        val result = ordered.filter { it in selected }.take(9)
-        return if (result.size == 9) result else defaults
+        val stored = try {
+            prefs.getString(strokePunctuationKey, null)
+        } catch (_: ClassCastException) {
+            null
+        }
+        if (!stored.isNullOrBlank()) {
+            val result = runCatching {
+                val json = JSONArray(stored)
+                (0 until json.length()).mapNotNull { index ->
+                    json.optString(index, null)
+                }.filter { it in strokePunctuationOptions }.distinct().take(9)
+            }.getOrDefault(emptyList())
+            if (result.size == 9) return result
+        }
+
+        // v2.9.4 used StringSet; migrate valid legacy data while retaining its canonical order.
+        val legacy = try {
+            prefs.getStringSet(strokePunctuationKey, null)
+        } catch (_: ClassCastException) {
+            null
+        }
+        if (legacy != null) {
+            val migrated = strokePunctuationOptions.filter { it in legacy }.take(9)
+            if (migrated.size == 9) {
+                saveStrokePunctuation(migrated)
+                return migrated
+            }
+        }
+        return strokePunctuationDefaults
+    }
+
+    private fun saveStrokePunctuation(order: List<String>) {
+        val json = JSONArray()
+        order.take(9).forEach { json.put(it) }
+        prefs.edit().putString(strokePunctuationKey, json.toString()).apply()
     }
 
     private fun chooseStrokePunctuation() {
-        val symbols = listOf("7", "?", "+", "\\", "/", "-", "(", ")", ":", "!", "@", "#", "\$", "%", "&", "*", "=", "_", "'", "\"", ";", ",", ".", "，", "。", "？", "！", "、", "：", "；", "（", "）", "…", "～")
-        val selected = strokePunctuation().toMutableSet()
+        val selected = strokePunctuation().toMutableList()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(6), dp(4), dp(6), dp(4))
@@ -1105,7 +1159,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         root.addView(title, LinearLayout.LayoutParams(-1, dp(42)))
 
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        for (symbol in symbols) {
+        for (symbol in strokePunctuationOptions) {
             val item = android.widget.CheckBox(this).apply {
                 text = symbol
                 textSize = 18f
@@ -1117,7 +1171,8 @@ class ImeService : InputMethodService(), LifecycleOwner {
                     if (checked && symbol !in selected && selected.size >= 9) {
                         isChecked = false
                         Toast.makeText(this@ImeService, "最多選擇9個標點", Toast.LENGTH_SHORT).show()
-                    } else if (checked) selected.add(symbol) else selected.remove(symbol)
+                    } else if (checked && symbol !in selected) selected.add(symbol)
+                    else if (!checked) selected.remove(symbol)
                     updateTitle()
                 }
             }
@@ -1136,7 +1191,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
             if (selected.size != 9) {
                 Toast.makeText(this, "請剛好選擇9個標點", Toast.LENGTH_SHORT).show()
             } else {
-                prefs.edit().putStringSet("strokePunctuation", selected.toSet()).apply()
+                saveStrokePunctuation(selected)
                 closePanel()
                 render()
             }
