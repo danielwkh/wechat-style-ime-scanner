@@ -946,7 +946,15 @@ class ImeService : InputMethodService(), LifecycleOwner {
         }
 
         val leftColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        for (s in listOf("，", "。", "？", "！")) key(leftColumn, s, "#FFFFFF", 1f, size = 16f) { commit(s) }
+        // 左側標點固定單項高度，讓內容超出可視範圍後由 ScrollView 提供上下慣性捲動。
+        for (s in listOf("，", "。", "？", "！", "、", "：", "；", "（", "）", "…", "～")) {
+            leftColumn.addView(
+                cell(s, 16f, "#FFFFFF", Color.BLACK) { commit(s) },
+                LinearLayout.LayoutParams(-1, dp(54)).apply {
+                    setMargins(dp(3), dp(3), dp(3), dp(3))
+                }
+            )
+        }
         val left = object : ScrollView(this@ImeService) {
             override fun dispatchTouchEvent(event: MotionEvent): Boolean {
                 if (event.actionMasked == MotionEvent.ACTION_DOWN) {
