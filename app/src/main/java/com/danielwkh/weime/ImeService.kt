@@ -532,7 +532,9 @@ class ImeService : InputMethodService(), LifecycleOwner {
                     lastX = e.x
                     lastTime = e.eventTime
                     val speed = (abs(dx) / dp(1).toFloat() / dt / 0.5f).coerceIn(0f, 3f)
-                    accum += dx * (1f + speed)
+                    // 左滑刪除放慢一半；右滑恢復維持原本速度。
+                    val movementScale = if (dx < 0f) 0.5f else 1f
+                    accum += dx * (1f + speed) * movementScale
                     while (accum <= -threshold) {
                         deleteUnit()?.let { undo.add(it) }
                         accum += threshold
@@ -943,8 +945,28 @@ class ImeService : InputMethodService(), LifecycleOwner {
             )
         }
 
-        val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        for (s in listOf("，", "。", "？", "！")) key(left, s, "#FFFFFF", 1f, size = 16f) { commit(s) }
+        val leftColumn = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        for (s in listOf("，", "。", "？", "！")) key(leftColumn, s, "#FFFFFF", 1f, size = 16f) { commit(s) }
+        val left = object : ScrollView(this@ImeService) {
+            override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    // 讓左側直排標點完整接收上下拖曳，使用 ScrollView 原生慣性捲動。
+                    kbRoot.suppress = true
+                }
+                val handled = super.dispatchTouchEvent(event)
+                if (event.actionMasked == MotionEvent.ACTION_UP ||
+                    event.actionMasked == MotionEvent.ACTION_CANCEL
+                ) {
+                    kbRoot.suppress = false
+                }
+                return handled
+            }
+        }.apply {
+            isFillViewport = true
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            addView(leftColumn, FrameLayout.LayoutParams(-1, h))
+        }
 
         val mid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         for (r in listOf("123", "456", "789")) {
