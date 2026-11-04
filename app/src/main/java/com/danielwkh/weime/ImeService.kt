@@ -955,6 +955,12 @@ class ImeService : InputMethodService(), LifecycleOwner {
                 }
             )
         }
+        leftColumn.addView(
+            cell("自訂", 14f, "#D0D0D0", Color.BLACK) { chooseStrokePunctuation() },
+            LinearLayout.LayoutParams(-1, dp(54)).apply {
+                setMargins(dp(3), dp(3), dp(3), dp(3))
+            }
+        )
         val left = object : ScrollView(this@ImeService) {
             override fun dispatchTouchEvent(event: MotionEvent): Boolean {
                 if (event.actionMasked == MotionEvent.ACTION_DOWN) {
