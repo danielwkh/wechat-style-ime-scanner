@@ -19,6 +19,8 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.ArrayAdapter
+import android.widget.AdapterView
+import android.widget.SeekBar
 import android.widget.TextView
 import kotlin.math.min
 
@@ -35,6 +37,10 @@ class PrintEditorActivity : Activity() {
     private lateinit var memberMode: CheckBox
     private lateinit var sizeLabel: TextView
     private var device = PrintDevice.P1
+    private var nameSize = 28
+    private var priceSize = 58
+    private var barcodeHeight = 58
+    private var barcodeScale = 72
 
     private enum class PrintDevice(val label: String, val widthMm: Int, val heightMm: Int) {
         P1("P1／P1P  70 × 40 mm", 70, 40),
@@ -104,6 +110,12 @@ class PrintEditorActivity : Activity() {
         template.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item,
             listOf("單一價格", "會員價／非會員價"))
         template.setSelection(0)
+        template.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (position == 1) memberMode.isChecked = true
+            }
+        }
         body.addView(template, LinearLayout.LayoutParams(-1, dp(48)))
         memberMode = CheckBox(this).apply {
             text = "顯示會員價／非會員價區塊"
@@ -131,6 +143,12 @@ class PrintEditorActivity : Activity() {
         body.addView(priceInput)
         body.addView(memberPriceInput)
         body.addView(nonMemberPriceInput)
+
+        body.addView(sectionTitle("4. 調整版面元素大小"))
+        body.addView(sizeControl("商品名字體", 12, 40, nameSize) { nameSize = it; preview.invalidate() })
+        body.addView(sizeControl("價格字體", 20, 86, priceSize) { priceSize = it; preview.invalidate() })
+        body.addView(sizeControl("條碼高度", 25, 90, barcodeHeight) { barcodeHeight = it; preview.invalidate() })
+        body.addView(sizeControl("條碼寬度", 40, 100, barcodeScale) { barcodeScale = it; preview.invalidate() })
 
         val actionRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         sizeLabel = TextView(this).apply { text = "畫布：70 × 40 mm"; textSize = 14f; setTextColor(Color.DKGRAY) }
@@ -160,7 +178,8 @@ class PrintEditorActivity : Activity() {
         preview.read = {
             LabelPreviewView.LabelData(
                 nameInput.text.toString(), barcodeInput.text.toString(), priceInput.text.toString(),
-                memberPriceInput.text.toString(), nonMemberPriceInput.text.toString(), memberMode.isChecked
+                memberPriceInput.text.toString(), nonMemberPriceInput.text.toString(), memberMode.isChecked,
+                nameSize, priceSize, barcodeHeight, barcodeScale
             )
         }
     }
@@ -181,11 +200,47 @@ class PrintEditorActivity : Activity() {
         this.text = text; textSize = 16f; setTextColor(Color.DKGRAY); setPadding(0, dp(12), 0, dp(4))
     }
 
+    private fun sizeControl(label: String, min: Int, max: Int, initial: Int, onChange: (Int) -> Unit): View {
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val value = TextView(this).apply {
+            text = "$label：$initial"
+            textSize = 14f
+            setTextColor(Color.DKGRAY)
+        }
+        val seek = SeekBar(this).apply {
+            this.max = max - min
+            progress = initial - min
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    val current = min + progress
+                    value.text = "$label：$current"
+                    onChange(current)
+                }
+                override fun onStartTrackingTouch(bar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(bar: SeekBar?) = Unit
+            })
+        }
+        row.addView(value, LinearLayout.LayoutParams(dp(112), dp(48)))
+        row.addView(seek, LinearLayout.LayoutParams(0, dp(48), 1f))
+        return row
+    }
+
     private fun showNotReady(message: String) = android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show()
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     private class LabelPreviewView(context: Context) : View(context) {
-        data class LabelData(val name: String, val barcode: String, val price: String, val member: String, val nonMember: String, val showMember: Boolean)
+        data class LabelData(
+            val name: String,
+            val barcode: String,
+            val price: String,
+            val member: String,
+            val nonMember: String,
+            val showMember: Boolean,
+            val nameSize: Int = 28,
+            val priceSize: Int = 58,
+            val barcodeHeight: Int = 58,
+            val barcodeScale: Int = 72
+        )
         var read: (() -> LabelData)? = null
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         override fun onDraw(canvas: Canvas) {
@@ -203,28 +258,54 @@ class PrintEditorActivity : Activity() {
             paint.color = Color.BLACK
             paint.textAlign = Paint.Align.CENTER
             paint.typeface = android.graphics.Typeface.DEFAULT_BOLD
-            paint.textSize = scale * 0.34f
+            paint.textSize = scale * d.nameSize / 40f
             canvas.drawText(d.name.ifBlank { "商品名稱" }, left + w / 2, top + scale * 0.58f, paint)
-            paint.style = Paint.Style.STROKE; paint.strokeWidth = maxOf(1f, scale * 0.025f)
-            val bx = left + scale * 0.35f; val by = top + scale * 1.25f; val bw = scale * 2.55f; val bh = scale * 1.05f
-            val code = d.barcode.ifBlank { "123456" }
-            for (i in code.indices) if (code[i].isDigit()) {
-                val x = bx + bw * i / code.length
-                paint.strokeWidth = if ((code[i] - '0') % 3 == 0) scale * 0.055f else scale * 0.025f
-                canvas.drawLine(x, by, x, by + bh, paint)
+
+            val encoded = BarcodeRenderer.encode(d.barcode)
+            val bx = left + w * 0.08f
+            val bw = min(w * d.barcodeScale / 100f, w * 0.84f)
+            val by = top + h * 0.27f
+            val bh = h * d.barcodeHeight / 100f
+            if (encoded != null) {
+                paint.style = Paint.Style.FILL
+                val module = bw / encoded.bits.length
+                for (i in encoded.bits.indices) {
+                    if (encoded.bits[i] == '1') {
+                        canvas.drawRect(bx + i * module, by, bx + (i + 1) * module, by + bh, paint)
+                    }
+                }
+                paint.textSize = scale * 0.17f
+                paint.typeface = android.graphics.Typeface.DEFAULT
+                canvas.drawText(encoded.display, bx + bw / 2f, by + bh + scale * 0.25f, paint)
+            } else {
+                paint.style = Paint.Style.STROKE
+                paint.color = Color.rgb(190, 45, 45)
+                canvas.drawRect(bx, by, bx + bw, by + bh, paint)
+                paint.style = Paint.Style.FILL
+                paint.textSize = scale * 0.14f
+                paint.typeface = android.graphics.Typeface.DEFAULT
+                canvas.drawText("EAN-13／EAN-8 條碼需有效校驗碼", bx + bw / 2f, by + bh / 2f, paint)
+                canvas.drawText(d.barcode.ifBlank { "請輸入 8、12 或 13 位條碼" }, bx + bw / 2f, by + bh + scale * 0.25f, paint)
+                paint.color = Color.BLACK
             }
-            paint.style = Paint.Style.FILL; paint.textSize = scale * 0.22f; paint.typeface = android.graphics.Typeface.DEFAULT
-            canvas.drawText(code, bx + bw / 2, by + bh + scale * 0.28f, paint)
-            paint.textSize = scale * 1.45f; paint.typeface = android.graphics.Typeface.DEFAULT_BOLD
+
+            paint.textSize = scale * d.priceSize / 40f
+            paint.typeface = android.graphics.Typeface.DEFAULT_BOLD
             if (d.showMember) {
                 paint.textAlign = Paint.Align.RIGHT
-                canvas.drawText("$${d.member.ifBlank { "0" }}", left + w - scale * 0.35f, top + scale * 2.55f, paint)
-                paint.textSize = scale * 0.42f; paint.typeface = android.graphics.Typeface.DEFAULT
-                canvas.drawText("會員價", left + w - scale * 2.05f, top + scale * 2.52f, paint)
-                canvas.drawText("非會員價 $${d.nonMember.ifBlank { "0" }}", left + w - scale * 0.35f, top + scale * 3.15f, paint)
+                canvas.drawText("$${d.member.ifBlank { "0" }}", left + w - scale * 0.25f, top + h * 0.65f, paint)
+                paint.textSize = scale * 0.28f
+                paint.typeface = android.graphics.Typeface.DEFAULT
+                canvas.drawText("會員價", left + w - scale * 2.0f, top + h * 0.64f, paint)
+                paint.textSize = scale * d.priceSize / 40f
+                paint.typeface = android.graphics.Typeface.DEFAULT_BOLD
+                canvas.drawText("$${d.nonMember.ifBlank { "0" }}", left + w - scale * 0.25f, top + h * 0.88f, paint)
+                paint.textSize = scale * 0.28f
+                paint.typeface = android.graphics.Typeface.DEFAULT
+                canvas.drawText("非會員價", left + w - scale * 2.0f, top + h * 0.87f, paint)
             } else {
                 paint.textAlign = Paint.Align.CENTER
-                canvas.drawText("$${d.price.ifBlank { "0" }}", left + w * 0.72f, top + scale * 3.0f, paint)
+                canvas.drawText("$${d.price.ifBlank { "0" }}", left + w * 0.74f, top + h * 0.82f, paint)
             }
             paint.style = Paint.Style.STROKE; paint.strokeWidth = 2f; paint.color = Color.LTGRAY
             canvas.drawRect(left, top, left + w, top + h, paint)
