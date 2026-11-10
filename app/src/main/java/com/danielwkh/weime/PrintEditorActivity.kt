@@ -166,10 +166,10 @@ class PrintEditorActivity : Activity() {
     }
 
     private fun field(hint: String, value: String): EditText = EditText(this).apply {
-        hint = hint
+        setHint(hint)
         setText(value)
         textSize = 16f
-        singleLine = true
+        setSingleLine(true)
         setPadding(dp(12), 0, dp(12), 0)
         background = android.graphics.drawable.GradientDrawable().apply {
             setColor(Color.WHITE); cornerRadius = dp(6).toFloat(); setStroke(dp(1), Color.LTGRAY)
