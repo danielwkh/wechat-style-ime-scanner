@@ -19,6 +19,8 @@
 
         <activity android:name=".SettingsActivity" android:exported="false" />
 
+        <activity android:name=".PrintEditorActivity" android:exported="false" />
+
         <activity
             android:name=".PermActivity"
             android:exported="false"

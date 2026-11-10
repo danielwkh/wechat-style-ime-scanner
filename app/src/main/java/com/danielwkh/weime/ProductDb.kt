@@ -9,12 +9,24 @@ import java.nio.file.StandardCopyOption
 import java.util.zip.ZipFile
 
 /**
- * 商品庫：條碼 → 商品名。資料存在 App 私有目錄的 products.tsv，匯入後離線可用。
- * 匯入 xlsx 時會自動找出「條碼欄」（可以有多個，例如第二條碼）和「名稱欄」，不需要固定欄位。
+ * 商品庫：條碼 → 商品名稱／原價／會員價／非會員價。資料存在 App 私有目錄的 products.tsv，匯入後離線可用。
+ * 舊版只有兩欄的 products.tsv 仍可讀取；匯入 xlsx 時會自動找出條碼、名稱及價格欄位。
  */
 object ProductDb {
-    @Volatile private var map: Map<String, String>? = null
-    data class Match(val code: String, val name: String)
+    data class Product(
+        val name: String,
+        val price: String = "",
+        val memberPrice: String = "",
+        val nonMemberPrice: String = ""
+    )
+    @Volatile private var map: Map<String, Product>? = null
+    data class Match(
+        val code: String,
+        val name: String,
+        val price: String = "",
+        val memberPrice: String = "",
+        val nonMemberPrice: String = ""
+    )
     private val matchCache = LinkedHashMap<String, List<Match>>()
 
     class ImportResult(
@@ -26,6 +38,9 @@ object ProductDb {
         val entry: String,
         val codeCols: List<Int>,
         val nameCol: Int,
+        val priceCol: Int,
+        val memberPriceCol: Int,
+        val nonMemberPriceCol: Int,
         val codeLabels: String,
         val nameLabel: String,
         val score: Double
@@ -40,6 +55,17 @@ object ProductDb {
         "商品名稱", "商品名称", "產品名稱", "产品名称", "貨品名稱", "货品名称", "貨物名稱", "货物名称",
         "品項名稱", "品项名称", "品項", "品项", "產品名", "产品名", "商品名", "品名", "貨名", "货名", "名稱", "名称",
         "productname", "itemname", "name", "description", "title", "product", "item"
+    )
+    private val PRICE_KEYS = listOf(
+        "原價", "原价", "售價", "售价", "零售價", "零售价", "單價", "单价", "價格", "价格",
+        "price", "retailprice", "sellingprice", "saleprice"
+    )
+    private val MEMBER_PRICE_KEYS = listOf(
+        "會員價", "会员价", "會員價格", "会员价格", "vip價", "vip价", "memberprice", "member_price", "vipprice"
+    )
+    private val NON_MEMBER_PRICE_KEYS = listOf(
+        "非會員價", "非会员价", "非會員價格", "非会员价格", "一般價", "一般价",
+        "nonmemberprice", "non_member_price", "regularprice", "normalprice"
     )
     private val CODE_PATTERN = Regex("^(\\d{4,14})(?:-[1-4])?$")
 
@@ -56,14 +82,21 @@ object ProductDb {
     private fun isCode(v: String) = codeBase(v) != null
     private fun isTextual(v: String) = v.any { it.isLetter() }
 
-    private fun get(ctx: Context): Map<String, String> {
+    private fun get(ctx: Context): Map<String, Product> {
         map?.let { return it }
-        val m = HashMap<String, String>()
+        val m = HashMap<String, Product>()
         val f = file(ctx)
         if (f.exists()) {
             f.forEachLine { line ->
-                val i = line.indexOf('\t')
-                if (i > 0) m[line.substring(0, i)] = line.substring(i + 1)
+                val fields = line.split('\t', limit = 5)
+                if (fields.size >= 2 && fields[0].isNotBlank()) {
+                    m[fields[0]] = Product(
+                        name = fields.getOrNull(1).orEmpty(),
+                        price = fields.getOrNull(2).orEmpty(),
+                        memberPrice = fields.getOrNull(3).orEmpty(),
+                        nonMemberPrice = fields.getOrNull(4).orEmpty()
+                    )
+                }
             }
         }
         map = m
@@ -81,12 +114,17 @@ object ProductDb {
         val normalized = (codeBase(code) ?: rawDigits).trimStart('0')
         val exact = m[normalized]
         val result = if (exact != null) {
-            listOf(Match(normalized, exact))
+            listOf(Match(normalized, exact.name, exact.price, exact.memberPrice, exact.nonMemberPrice))
         } else {
             val byName = LinkedHashMap<String, Match>()
             val queries = listOf(rawDigits, normalized).distinct().filter { it.length >= 6 }
-            for ((key, name) in m) {
-                if (queries.any { key.contains(it) }) byName.putIfAbsent(name, Match(key, name))
+            for ((key, product) in m) {
+                if (queries.any { key.contains(it) }) {
+                    byName.putIfAbsent(
+                        product.name,
+                        Match(key, product.name, product.price, product.memberPrice, product.nonMemberPrice)
+                    )
+                }
             }
             byName.values.sortedBy { it.name }
         }
@@ -98,6 +136,14 @@ object ProductDb {
     }
 
     fun lookup(ctx: Context, code: String): String? = findMatches(ctx, code).singleOrNull()?.name
+
+    /** 取得唯一匹配或使用者指定商品的完整資料，供列印編輯器帶入欄位。 */
+    fun lookupProduct(ctx: Context, code: String, selectedName: String? = null): Product? {
+        val matches = findMatches(ctx, code)
+        val match = if (selectedName == null) matches.singleOrNull()
+        else matches.firstOrNull { it.name == selectedName }
+        return match?.let { Product(it.name, it.price, it.memberPrice, it.nonMemberPrice) }
+    }
 
     /** 用工作表前幾十列判斷哪些欄是條碼、哪一欄是名稱；找不到就回傳 null。 */
     private fun detect(entry: String, sample: List<List<String>>): Plan? {
@@ -150,8 +196,19 @@ object ProductDb {
         }
         val codeCols = if (explicitCodeCols.isNotEmpty()) explicitCodeCols else inferredCodeCols
         if (codeCols.isEmpty() || nameCol < 0) return null
+        fun compact(value: String) = value.lowercase().replace(" ", "").replace("_", "")
+        fun findHeaderColumn(keys: List<String>, blocked: List<String> = emptyList()): Int {
+            return header.indexOfFirst { raw ->
+                val label = compact(raw)
+                blocked.none { label.contains(compact(it)) } &&
+                    keys.any { label.contains(compact(it)) }
+            }
+        }
+        val priceCol = findHeaderColumn(PRICE_KEYS, MEMBER_PRICE_KEYS + NON_MEMBER_PRICE_KEYS)
+        val memberPriceCol = findHeaderColumn(MEMBER_PRICE_KEYS)
+        val nonMemberPriceCol = findHeaderColumn(NON_MEMBER_PRICE_KEYS)
         return Plan(
-            entry, codeCols, nameCol,
+            entry, codeCols, nameCol, priceCol, memberPriceCol, nonMemberPriceCol,
             codeCols.joinToString("、") { labelOf(it) }, labelOf(nameCol),
             nameScore + codeCols.size * 10
         )
@@ -180,7 +237,7 @@ object ProductDb {
                 val plan = best ?: throw IllegalStateException("找不到商品資料：檔案裡需要有「條碼」和「名稱」類的欄位")
 
                 // 補全模式：保留原有商品庫，條碼和名稱都相同的略過，沒有的新增，條碼相同但名稱不同的更新名稱
-                val m = HashMap<String, String>(get(ctx))
+                val m = HashMap<String, Product>(get(ctx))
                 val seen = HashSet<String>()
                 var added = 0
                 var updated = 0
@@ -188,16 +245,20 @@ object ProductDb {
                 XlsxReader.forEachRow(z, plan.entry, shared) { r ->
                     val name = r.getOrNull(plan.nameCol)?.trim().orEmpty()
                     if (name.isNotEmpty() && isTextual(name)) {
+                        val price = r.getOrNull(plan.priceCol)?.trim().orEmpty()
+                        val memberPrice = r.getOrNull(plan.memberPriceCol)?.trim().orEmpty()
+                        val nonMemberPrice = r.getOrNull(plan.nonMemberPriceCol)?.trim().orEmpty()
                         for (c in plan.codeCols) {
                             val code = r.getOrNull(c)?.trim().orEmpty()
                             val k = codeBase(code)
                             if (k != null) {
                                 if (k.isEmpty() || !seen.add(k)) continue   // 同一檔案內重複的條碼只處理第一次
+                                val product = Product(name, price, memberPrice, nonMemberPrice)
                                 val old = m[k]
                                 when {
-                                    old == null -> { m[k] = name; added++ }
-                                    old == name -> skipped++
-                                    else -> { m[k] = name; updated++ }
+                                    old == null -> { m[k] = product; added++ }
+                                    old == product -> skipped++
+                                    else -> { m[k] = product; updated++ }
                                 }
                             }
                         }
@@ -206,7 +267,11 @@ object ProductDb {
                 if (m.isEmpty()) throw IllegalStateException("找不到有效的條碼資料")
                 val tmpOut = File(ctx.filesDir, "products.tsv.tmp")
                 tmpOut.bufferedWriter().use { w ->
-                    for ((k, v) in m) w.write(k + "\t" + v.replace('\t', ' ').replace('\n', ' ') + "\n")
+                    for ((k, product) in m) {
+                        val fields = listOf(product.name, product.price, product.memberPrice, product.nonMemberPrice)
+                            .map { it.replace('\t', ' ').replace('\n', ' ') }
+                        w.write(k + "\t" + fields.joinToString("\t") + "\n")
+                    }
                 }
                 val target = file(ctx)
                 try {

@@ -135,6 +135,11 @@ class KeyboardRoot(
 class ImeService : InputMethodService(), LifecycleOwner {
     companion object {
         @Volatile var pending: String? = null
+        private const val PRINT_BARCODE_KEY = "printBarcode"
+        private const val PRINT_NAME_KEY = "printName"
+        private const val PRINT_PRICE_KEY = "printPrice"
+        private const val PRINT_MEMBER_PRICE_KEY = "printMemberPrice"
+        private const val PRINT_NON_MEMBER_PRICE_KEY = "printNonMemberPrice"
     }
 
     private val registry = LifecycleRegistry(this)
@@ -279,6 +284,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
             return t
         }
         tool("📷", 15f) { toggleScan() }
+        tool("🖨", 15f) { openPrintEditor() }
         tool("📋", 15f) { openClipPanel() }
         convBtn = tool(if (simplified) "简" else "繁", 15f) { toggleSimplified() }
         tool("😀", 15f) { openEmojiPanel(1) }
@@ -1807,6 +1813,11 @@ class ImeService : InputMethodService(), LifecycleOwner {
         startActivity(Intent(this, SettingsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
+    private fun openPrintEditor() {
+        commitAll()
+        startActivity(Intent(this, PrintEditorActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
     private fun roundBg(color: String) = GradientDrawable().apply {
         setColor(Color.parseColor(color))
         cornerRadius = dp(6).toFloat()
@@ -2304,8 +2315,17 @@ class ImeService : InputMethodService(), LifecycleOwner {
         stopDelRepeat()
         // 輸出碼照相機實際讀到的數字原樣輸出，不補足長度或改寫尾碼。
         var text = code.filter { it.isDigit() }
+        val product = ProductDb.lookupProduct(this, code, selectedName)
+        val productName = selectedName ?: product?.name
+        prefs.edit()
+            .putString(PRINT_BARCODE_KEY, text)
+            .putString(PRINT_NAME_KEY, productName ?: "")
+            .putString(PRINT_PRICE_KEY, product?.price ?: "")
+            .putString(PRINT_MEMBER_PRICE_KEY, product?.memberPrice ?: "")
+            .putString(PRINT_NON_MEMBER_PRICE_KEY, product?.nonMemberPrice ?: "")
+            .apply()
         if (outName) {
-            val name = selectedName ?: ProductDb.lookup(this, code)
+            val name = productName
             if (name != null) text = name
             else notify(
                 if (ProductDb.count(this) == 0) "尚未匯入商品庫，已輸出數字"
