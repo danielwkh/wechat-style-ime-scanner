@@ -268,11 +268,8 @@ class ImeService : InputMethodService(), LifecycleOwner {
         midFrame = FrameLayout(this)
 
         // 工具欄：剪貼板、簡繁、表情、語音、設定
-        toolbar = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            isFillViewport = false
-            overScrollMode = View.OVER_SCROLL_ALWAYS
-            setOnTouchListener { _, ev ->
+        toolbar = object : HorizontalScrollView(this@ImeService) {
+            override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
                 when (ev.actionMasked) {
                     MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
                         kbRoot.suppress = true
@@ -283,13 +280,40 @@ class ImeService : InputMethodService(), LifecycleOwner {
                         parent?.requestDisallowInterceptTouchEvent(false)
                     }
                 }
-                false
+                return super.dispatchTouchEvent(ev)
             }
+
+            override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+                if (ev.actionMasked == MotionEvent.ACTION_DOWN || ev.actionMasked == MotionEvent.ACTION_MOVE) {
+                    kbRoot.suppress = true
+                    parent?.requestDisallowInterceptTouchEvent(true)
+                }
+                return super.onInterceptTouchEvent(ev)
+            }
+
+            override fun onTouchEvent(ev: MotionEvent): Boolean {
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
+                        kbRoot.suppress = true
+                        parent?.requestDisallowInterceptTouchEvent(true)
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        kbRoot.suppress = false
+                        parent?.requestDisallowInterceptTouchEvent(false)
+                    }
+                }
+                return super.onTouchEvent(ev)
+            }
+        }.apply {
+            isHorizontalScrollBarEnabled = false
+            isFillViewport = false
+            overScrollMode = View.OVER_SCROLL_ALWAYS
         }
         val tools = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(Color.parseColor("#202124"))
             layoutParams = FrameLayout.LayoutParams(-2, -1)
+            minimumWidth = dp(7 * 40)
         }
         fun tool(label: String, size: Float, click: () -> Unit): TextView {
             val t = cell(label, size, "#303134", Color.LTGRAY, click).apply {
@@ -2127,13 +2151,13 @@ class ImeService : InputMethodService(), LifecycleOwner {
                 val now = SystemClock.elapsedRealtime()
                 val values = list.mapNotNull { it.rawValue?.trim()?.takeIf { value -> value.isNotEmpty() } }
                 // 品名模式逐一查找完整碼或至少六位的唯一/多候選片段。
-                val resolved = if (outName) values.asSequence()
+                val resolved = values.asSequence()
                     .map { it to ProductDb.findMatches(this, it) }
-                    .firstOrNull { it.second.isNotEmpty() } else null
+                    .firstOrNull { it.second.isNotEmpty() }
                 val v = if (outName) resolved?.first else values.firstOrNull()
                 if (v != null) {
                     val matches = resolved?.second.orEmpty()
-                    if (outName && matches.size > 1) acceptChoices(v, matches) else accept(v)
+                    if (matches.size > 1) acceptChoices(v, matches) else accept(v)
                     proxy.close()
                 } else {
                     if (outName && values.isNotEmpty() && now - lastLookupHint > 2000) {
@@ -2257,13 +2281,13 @@ class ImeService : InputMethodService(), LifecycleOwner {
         for (c in cands) {
             if (c.text.length !in 6..14) continue
             if (!barcodeAbove(bmp, c.r)) continue
-            val matches = if (outName) ProductDb.findMatches(this, c.text) else emptyList()
+            val matches = ProductDb.findMatches(this, c.text)
             if (outName && matches.isEmpty()) continue
             val ok = gs1Ok(c.text)
             val n = (ocrSeen[c.text] ?: 0) + 1
             ocrSeen[c.text] = n
             if ((ok && n >= 2) || n >= 3) {
-                if (outName && matches.size > 1) acceptChoices(c.text, matches) else accept(c.text)
+                if (matches.size > 1) acceptChoices(c.text, matches) else accept(c.text)
                 return
             }
         }

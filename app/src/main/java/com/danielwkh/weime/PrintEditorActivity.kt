@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.widget.Button
 import android.widget.CheckBox
@@ -22,6 +23,8 @@ import android.widget.ArrayAdapter
 import android.widget.AdapterView
 import android.widget.SeekBar
 import android.widget.TextView
+import kotlin.math.atan2
+import kotlin.math.hypot
 import kotlin.math.min
 
 /**
@@ -57,6 +60,7 @@ class PrintEditorActivity : Activity() {
         val draftPrice = draftPrefs.getString("printPrice", "").orEmpty()
         val draftMemberPrice = draftPrefs.getString("printMemberPrice", "").orEmpty()
         val draftNonMemberPrice = draftPrefs.getString("printNonMemberPrice", "").orEmpty()
+            .ifBlank { draftPrice }
         val layoutPrefs = getSharedPreferences("printLayout", MODE_PRIVATE)
         nameSize = layoutPrefs.getInt("nameSize", nameSize)
         priceSize = layoutPrefs.getInt("priceSize", priceSize)
@@ -93,6 +97,37 @@ class PrintEditorActivity : Activity() {
         root.addView(preview, LinearLayout.LayoutParams(-1, dp(220)).apply {
             setMargins(dp(12), dp(12), dp(12), dp(8))
         })
+        root.addView(TextView(this).apply {
+            text = "點選商品名、條碼或價格後拖曳；雙指可縮放及旋轉"
+            textSize = 13f
+            setTextColor(Color.DKGRAY)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(6))
+        }, LinearLayout.LayoutParams(-1, dp(28)))
+        val canvasTools = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), 0, dp(8), dp(4))
+        }
+        val toolRow = LinearLayout(this).apply { gravity = Gravity.CENTER }
+        fun canvasButton(label: String, click: () -> Unit) = Button(this).apply {
+            text = label
+            textSize = 12f
+            setOnClickListener { click(); preview.invalidate() }
+        }
+        toolRow.addView(canvasButton("左對齊") { preview.alignSelected("left") }, LinearLayout.LayoutParams(0, dp(42), 1f))
+        toolRow.addView(canvasButton("水平置中") { preview.alignSelected("center") }, LinearLayout.LayoutParams(0, dp(42), 1f))
+        toolRow.addView(canvasButton("右對齊") { preview.alignSelected("right") }, LinearLayout.LayoutParams(0, dp(42), 1f))
+        toolRow.addView(canvasButton("旋轉 90°") { preview.rotateSelected() }, LinearLayout.LayoutParams(0, dp(42), 1f))
+        canvasTools.addView(toolRow)
+        val toolRow2 = LinearLayout(this).apply { gravity = Gravity.CENTER }
+        toolRow2.addView(canvasButton("頂端") { preview.alignSelected("top") }, LinearLayout.LayoutParams(0, dp(42), 1f))
+        toolRow2.addView(canvasButton("垂直置中") { preview.alignSelected("middle") }, LinearLayout.LayoutParams(0, dp(42), 1f))
+        toolRow2.addView(canvasButton("底端") { preview.alignSelected("bottom") }, LinearLayout.LayoutParams(0, dp(42), 1f))
+        toolRow2.addView(canvasButton("反色選取") {
+            preview.toggleInvertSelected()
+        }, LinearLayout.LayoutParams(0, dp(42), 1f))
+        canvasTools.addView(toolRow2)
+        root.addView(canvasTools, LinearLayout.LayoutParams(-1, dp(88)))
 
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -143,6 +178,7 @@ class PrintEditorActivity : Activity() {
         nonMemberPriceInput = field("非會員價", draftNonMemberPrice)
         val hasMemberPrices = draftMemberPrice.isNotBlank() || draftNonMemberPrice.isNotBlank()
         memberMode.isChecked = hasMemberPrices
+        template.setSelection(if (hasMemberPrices) 1 else 0)
         memberPriceInput.visibility = if (hasMemberPrices) View.VISIBLE else View.GONE
         nonMemberPriceInput.visibility = if (hasMemberPrices) View.VISIBLE else View.GONE
         body.addView(nameInput)
@@ -246,6 +282,7 @@ class PrintEditorActivity : Activity() {
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     private class LabelPreviewView(context: Context) : View(context) {
+        enum class Element { NAME, BARCODE, PRICE }
         data class LabelData(
             val name: String,
             val barcode: String,
@@ -257,10 +294,50 @@ class PrintEditorActivity : Activity() {
             val priceSize: Int = 58,
             val barcodeLabelSize: Int = 17,
             val barcodeHeight: Int = 58,
-            val barcodeScale: Int = 72
+            val barcodeScale: Int = 72,
         )
+        private data class Transform(var dx: Float = 0f, var dy: Float = 0f, var scale: Float = 1f, var rotation: Float = 0f, var invert: Boolean = false)
         var read: (() -> LabelData)? = null
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val transforms = Element.values().associateWith { Transform() }.toMutableMap()
+        private var selected = Element.NAME
+        private var lastX = 0f
+        private var lastY = 0f
+        private var baseDistance = 1f
+        private var baseAngle = 0f
+        private var baseScale = 1f
+        private var baseRotation = 0f
+        private var lastCanvas = floatArrayOf(0f, 0f, 0f, 0f)
+        private var lastRects: Map<Element, FloatArray> = emptyMap()
+
+        fun rotateSelected() {
+            transforms.getValue(selected).rotation = (transforms.getValue(selected).rotation + 90f) % 360f
+            invalidate()
+        }
+
+        fun toggleInvertSelected() {
+            val tr = transforms.getValue(selected)
+            tr.invert = !tr.invert
+            invalidate()
+        }
+
+        fun alignSelected(mode: String) {
+            val rect = lastRects[selected] ?: return
+            val canvas = lastCanvas
+            val tr = transforms.getValue(selected)
+            val cx = (rect[0] + rect[2]) / 2f
+            val cy = (rect[1] + rect[3]) / 2f
+            when (mode) {
+                "left" -> tr.dx = canvas[0] + (rect[2] - rect[0]) / 2f - cx
+                "center" -> tr.dx = (canvas[0] + canvas[2]) / 2f - cx
+                "right" -> tr.dx = canvas[2] - (rect[2] - rect[0]) / 2f - cx
+                "top" -> tr.dy = canvas[1] + (rect[3] - rect[1]) / 2f - cy
+                "middle" -> tr.dy = (canvas[1] + canvas[3]) / 2f - cy
+                "bottom" -> tr.dy = canvas[3] - (rect[3] - rect[1]) / 2f - cy
+            }
+            invalidate()
+        }
+
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             val d = read?.invoke() ?: LabelData("", "", "", "", "", false)
@@ -271,64 +348,124 @@ class PrintEditorActivity : Activity() {
             val h = 4f * scale
             val left = (width - w) / 2f
             val top = (height - h) / 2f
+            lastCanvas = floatArrayOf(left, top, left + w, top + h)
             paint.color = Color.WHITE; paint.style = Paint.Style.FILL
             canvas.drawRect(left, top, left + w, top + h, paint)
             paint.color = Color.BLACK
-            paint.textAlign = Paint.Align.CENTER
-            paint.typeface = android.graphics.Typeface.DEFAULT_BOLD
-            paint.textSize = scale * d.nameSize / 40f
-            canvas.drawText(d.name.ifBlank { "商品名稱" }, left + w / 2, top + scale * 0.58f, paint)
 
+            val nameRect = floatArrayOf(left + scale * 0.35f, top + scale * 0.18f, left + w - scale * 0.35f, top + scale * 0.82f)
             val encoded = BarcodeRenderer.encode(d.barcode)
             val bx = left + w * 0.08f
             val bw = min(w * d.barcodeScale / 100f, w * 0.84f)
             val by = top + h * 0.27f
             val bh = h * d.barcodeHeight / 100f
-            if (encoded != null) {
-                paint.style = Paint.Style.FILL
-                val module = bw / encoded.bits.length
-                for (i in encoded.bits.indices) {
-                    if (encoded.bits[i] == '1') {
+            val barcodeRect = floatArrayOf(bx, by, bx + bw, by + bh + scale * 0.34f)
+            val priceRect = floatArrayOf(left + w * 0.48f, top + h * 0.48f, left + w - scale * 0.15f, top + h - scale * 0.12f)
+            lastRects = mapOf(Element.NAME to nameRect, Element.BARCODE to barcodeRect, Element.PRICE to priceRect)
+
+            withTransform(canvas, Element.NAME, nameRect[0], nameRect[1], nameRect[2], nameRect[3]) {
+                paint.textAlign = Paint.Align.CENTER
+                paint.typeface = android.graphics.Typeface.DEFAULT_BOLD
+                paint.textSize = scale * d.nameSize / 40f
+                canvas.drawText(d.name.ifBlank { "商品名稱" }, (nameRect[0] + nameRect[2]) / 2f, top + scale * 0.58f, paint)
+            }
+            withTransform(canvas, Element.BARCODE, barcodeRect[0], barcodeRect[1], barcodeRect[2], barcodeRect[3]) {
+                if (encoded != null) {
+                    paint.style = Paint.Style.FILL
+                    val module = bw / encoded.bits.length
+                    for (i in encoded.bits.indices) if (encoded.bits[i] == '1') {
                         canvas.drawRect(bx + i * module, by, bx + (i + 1) * module, by + bh, paint)
                     }
+                    paint.textSize = scale * d.barcodeLabelSize / 40f
+                    paint.typeface = android.graphics.Typeface.DEFAULT
+                    canvas.drawText(encoded.display.takeLast(6), bx + bw / 2f, by + bh + scale * 0.25f, paint)
+                } else {
+                    paint.style = Paint.Style.STROKE; paint.color = Color.rgb(190, 45, 45)
+                    canvas.drawRect(bx, by, bx + bw, by + bh, paint)
+                    paint.style = Paint.Style.FILL; paint.textSize = scale * 0.14f
+                    paint.typeface = android.graphics.Typeface.DEFAULT
+                    canvas.drawText("條碼格式無效", bx + bw / 2f, by + bh / 2f, paint)
+                    paint.color = Color.BLACK
                 }
-                paint.textSize = scale * d.barcodeLabelSize / 40f
-                paint.typeface = android.graphics.Typeface.DEFAULT
-                val humanReadable = encoded.display.takeLast(6)
-                canvas.drawText(humanReadable, bx + bw / 2f, by + bh + scale * 0.25f, paint)
-            } else {
-                paint.style = Paint.Style.STROKE
-                paint.color = Color.rgb(190, 45, 45)
-                canvas.drawRect(bx, by, bx + bw, by + bh, paint)
-                paint.style = Paint.Style.FILL
-                paint.textSize = scale * 0.14f
-                paint.typeface = android.graphics.Typeface.DEFAULT
-                canvas.drawText("EAN-13／EAN-8 條碼需有效校驗碼", bx + bw / 2f, by + bh / 2f, paint)
-                canvas.drawText(d.barcode.ifBlank { "請輸入 8、12 或 13 位條碼" }, bx + bw / 2f, by + bh + scale * 0.25f, paint)
-                paint.color = Color.BLACK
             }
-
-            paint.textSize = scale * d.priceSize / 40f
-            paint.typeface = android.graphics.Typeface.DEFAULT_BOLD
-            if (d.showMember) {
-                paint.textAlign = Paint.Align.RIGHT
-                canvas.drawText("$${d.member.ifBlank { "0" }}", left + w - scale * 0.25f, top + h * 0.65f, paint)
-                paint.textSize = scale * 0.28f
-                paint.typeface = android.graphics.Typeface.DEFAULT
-                canvas.drawText("會員價", left + w - scale * 2.0f, top + h * 0.64f, paint)
+            withTransform(canvas, Element.PRICE, priceRect[0], priceRect[1], priceRect[2], priceRect[3]) {
                 paint.textSize = scale * d.priceSize / 40f
                 paint.typeface = android.graphics.Typeface.DEFAULT_BOLD
-                canvas.drawText("$${d.nonMember.ifBlank { "0" }}", left + w - scale * 0.25f, top + h * 0.88f, paint)
-                paint.textSize = scale * 0.28f
-                paint.typeface = android.graphics.Typeface.DEFAULT
-                canvas.drawText("非會員價", left + w - scale * 2.0f, top + h * 0.87f, paint)
-            } else {
-                paint.textAlign = Paint.Align.CENTER
-                canvas.drawText("$${d.price.ifBlank { "0" }}", left + w * 0.74f, top + h * 0.82f, paint)
+                if (d.showMember) {
+                    paint.textAlign = Paint.Align.RIGHT
+                    canvas.drawText("$${d.member.ifBlank { "0" }}", left + w - scale * 0.25f, top + h * 0.65f, paint)
+                    paint.textSize = scale * 0.28f; paint.typeface = android.graphics.Typeface.DEFAULT
+                    canvas.drawText("會員價", left + w - scale * 2.0f, top + h * 0.64f, paint)
+                    paint.textSize = scale * d.priceSize / 40f; paint.typeface = android.graphics.Typeface.DEFAULT_BOLD
+                    canvas.drawText("$${d.nonMember.ifBlank { "0" }}", left + w - scale * 0.25f, top + h * 0.88f, paint)
+                    paint.textSize = scale * 0.28f; paint.typeface = android.graphics.Typeface.DEFAULT
+                    canvas.drawText("非會員價", left + w - scale * 2.0f, top + h * 0.87f, paint)
+                } else {
+                    paint.textAlign = Paint.Align.CENTER
+                    canvas.drawText("$${d.price.ifBlank { "0" }}", left + w * 0.74f, top + h * 0.82f, paint)
+                }
             }
             paint.style = Paint.Style.STROKE; paint.strokeWidth = 2f; paint.color = Color.LTGRAY
             canvas.drawRect(left, top, left + w, top + h, paint)
+            drawSelection(canvas, selected, nameRect, barcodeRect, priceRect)
         }
-        private fun dp(v: Int) = (v * resources.displayMetrics.density)
+
+        private fun withTransform(canvas: Canvas, element: Element, l: Float, t: Float, r: Float, b: Float, draw: () -> Unit) {
+            val tr = transforms.getValue(element)
+            val cx = (l + r) / 2f; val cy = (t + b) / 2f
+            canvas.save()
+            canvas.translate(tr.dx, tr.dy)
+            canvas.rotate(tr.rotation, cx, cy)
+            canvas.scale(tr.scale, tr.scale, cx, cy)
+            if (tr.invert) {
+                paint.style = Paint.Style.FILL
+                paint.color = Color.BLACK
+                canvas.drawRect(l, t, r, b, paint)
+                paint.color = Color.WHITE
+            } else {
+                paint.color = Color.BLACK
+            }
+            draw()
+            canvas.restore()
+        }
+
+        private fun drawSelection(canvas: Canvas, element: Element, name: FloatArray, barcode: FloatArray, price: FloatArray) {
+            val rect = when (element) { Element.NAME -> name; Element.BARCODE -> barcode; Element.PRICE -> price }
+            val tr = transforms.getValue(element)
+            canvas.save(); canvas.translate(tr.dx, tr.dy); canvas.rotate(tr.rotation, (rect[0] + rect[2]) / 2f, (rect[1] + rect[3]) / 2f)
+            canvas.scale(tr.scale, tr.scale, (rect[0] + rect[2]) / 2f, (rect[1] + rect[3]) / 2f)
+            paint.style = Paint.Style.STROKE; paint.strokeWidth = dp(2f); paint.color = Color.rgb(40, 120, 230)
+            canvas.drawRect(rect[0], rect[1], rect[2], rect[3], paint)
+            canvas.restore()
+        }
+
+        override fun onTouchEvent(event: MotionEvent): Boolean {
+            val data = read?.invoke() ?: return true
+            val pad = dp(10f); val s = min((width - pad * 2) / 7f, (height - pad * 2) / 4f); val w = 7f * s; val h = 4f * s
+            val l = (width - w) / 2f; val t = (height - h) / 2f
+            val barcode = floatArrayOf(l + w * 0.08f, t + h * 0.27f, l + w * 0.08f + min(w * data.barcodeScale / 100f, w * 0.84f), t + h * 0.27f + h * data.barcodeHeight / 100f + s * 0.34f)
+            val hitElement = hit(event.x, event.y, l + s * 0.35f, t + s * 0.18f, l + w - s * 0.35f, t + s * 0.82f, barcode, l + w * 0.48f, t + h * 0.48f, l + w - s * 0.15f, t + h - s * 0.12f)
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { selected = hitElement; lastX = event.x; lastY = event.y; invalidate() }
+                MotionEvent.ACTION_POINTER_DOWN -> if (event.pointerCount >= 2) {
+                    baseDistance = distance(event); baseAngle = angle(event); val tr = transforms.getValue(selected); baseScale = tr.scale; baseRotation = tr.rotation
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val tr = transforms.getValue(selected)
+                    if (event.pointerCount >= 2 && baseDistance > 0f) { tr.scale = (baseScale * distance(event) / baseDistance).coerceIn(0.4f, 3f); tr.rotation = baseRotation + angle(event) - baseAngle }
+                    else { tr.dx += event.x - lastX; tr.dy += event.y - lastY }
+                    lastX = event.x; lastY = event.y; invalidate()
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { baseDistance = 0f; invalidate() }
+            }
+            return true
+        }
+
+        private fun hit(x: Float, y: Float, nl: Float, nt: Float, nr: Float, nb: Float, b: FloatArray, pl: Float, pt: Float, pr: Float, pb: Float): Element {
+            return when { x in b[0]..b[2] && y in b[1]..b[3] -> Element.BARCODE; x in pl..pr && y in pt..pb -> Element.PRICE; x in nl..nr && y in nt..nb -> Element.NAME; else -> selected }
+        }
+        private fun distance(e: MotionEvent) = hypot(e.getX(0) - e.getX(1), e.getY(0) - e.getY(1))
+        private fun angle(e: MotionEvent) = Math.toDegrees(atan2((e.getY(1) - e.getY(0)).toDouble(), (e.getX(1) - e.getX(0)).toDouble())).toFloat()
+        private fun dp(v: Float) = v * resources.displayMetrics.density
     }
 }

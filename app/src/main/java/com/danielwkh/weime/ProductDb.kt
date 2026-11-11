@@ -9,8 +9,8 @@ import java.nio.file.StandardCopyOption
 import java.util.zip.ZipFile
 
 /**
- * 商品庫：條碼 → 商品名稱／原價／會員價／非會員價。資料存在 App 私有目錄的 products.tsv，匯入後離線可用。
- * 舊版只有兩欄的 products.tsv 仍可讀取；匯入 xlsx 時會自動找出條碼、名稱及價格欄位。
+ * 商品庫：條碼 → 商品名稱／售價（非會員價）／會員價。資料存在 App 私有目錄的 products.tsv，匯入後離線可用。
+ * 舊版只有兩欄的 products.tsv 仍可讀取；匯入 xlsx 時會自動找出條碼、名稱、售價及會員價欄位。
  */
 object ProductDb {
     data class Product(
@@ -57,15 +57,15 @@ object ProductDb {
         "productname", "itemname", "name", "description", "title", "product", "item"
     )
     private val PRICE_KEYS = listOf(
-        "原價", "原价", "售價", "售价", "零售價", "零售价", "單價", "单价", "價格", "价格",
-        "price", "retailprice", "sellingprice", "saleprice"
+        "原價", "原价", "原售價", "原售价", "售價", "售价", "零售價", "零售价", "單價", "单价", "價格", "价格",
+        "price", "retailprice", "sellingprice", "saleprice", "unitprice", "normalprice"
     )
     private val MEMBER_PRICE_KEYS = listOf(
-        "會員價", "会员价", "會員價格", "会员价格", "vip價", "vip价", "memberprice", "member_price", "vipprice"
+        "會員價", "会员价", "會員價格", "会员价格", "會員售價", "会员售价", "vip價", "vip价", "memberprice", "member_price", "vipprice"
     )
     private val NON_MEMBER_PRICE_KEYS = listOf(
-        "非會員價", "非会员价", "非會員價格", "非会员价格", "一般價", "一般价",
-        "nonmemberprice", "non_member_price", "regularprice", "normalprice"
+        "非會員價", "非会员价", "非會員價格", "非会员价格", "非會員售價", "非会员售价", "一般價", "一般价",
+        "nonmemberprice", "non_member_price", "regularprice", "normalprice", "retailprice"
     )
     private val CODE_PATTERN = Regex("^(\\d{4,14})(?:-[1-4])?$")
 
@@ -94,7 +94,7 @@ object ProductDb {
                         name = fields.getOrNull(1).orEmpty(),
                         price = fields.getOrNull(2).orEmpty(),
                         memberPrice = fields.getOrNull(3).orEmpty(),
-                        nonMemberPrice = fields.getOrNull(4).orEmpty()
+                        nonMemberPrice = fields.getOrNull(4).orEmpty().ifBlank { fields.getOrNull(2).orEmpty() }
                     )
                 }
             }
@@ -247,7 +247,8 @@ object ProductDb {
                     if (name.isNotEmpty() && isTextual(name)) {
                         val price = r.getOrNull(plan.priceCol)?.trim().orEmpty()
                         val memberPrice = r.getOrNull(plan.memberPriceCol)?.trim().orEmpty()
-                        val nonMemberPrice = r.getOrNull(plan.nonMemberPriceCol)?.trim().orEmpty()
+                        // 非會員價就是售價／原價；保留舊版獨立欄位作為相容 fallback。
+                        val nonMemberPrice = r.getOrNull(plan.nonMemberPriceCol)?.trim().orEmpty().ifBlank { price }
                         for (c in plan.codeCols) {
                             val code = r.getOrNull(c)?.trim().orEmpty()
                             val k = codeBase(code)
