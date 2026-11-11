@@ -342,7 +342,7 @@ class PrintEditorActivity : Activity() {
             super.onDraw(canvas)
             val d = read?.invoke() ?: LabelData("", "", "", "", "", false)
             canvas.drawColor(Color.rgb(232, 232, 235))
-            val pad = dp(10).toFloat()
+            val pad = dp(10f)
             val scale = min((width - pad * 2) / 7f, (height - pad * 2) / 4f)
             val w = 7f * scale
             val h = 4f * scale
