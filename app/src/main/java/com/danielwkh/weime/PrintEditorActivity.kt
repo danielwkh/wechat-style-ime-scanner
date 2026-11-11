@@ -39,6 +39,7 @@ class PrintEditorActivity : Activity() {
     private var device = PrintDevice.P1
     private var nameSize = 28
     private var priceSize = 58
+    private var barcodeLabelSize = 17
     private var barcodeHeight = 58
     private var barcodeScale = 72
 
@@ -56,6 +57,12 @@ class PrintEditorActivity : Activity() {
         val draftPrice = draftPrefs.getString("printPrice", "").orEmpty()
         val draftMemberPrice = draftPrefs.getString("printMemberPrice", "").orEmpty()
         val draftNonMemberPrice = draftPrefs.getString("printNonMemberPrice", "").orEmpty()
+        val layoutPrefs = getSharedPreferences("printLayout", MODE_PRIVATE)
+        nameSize = layoutPrefs.getInt("nameSize", nameSize)
+        priceSize = layoutPrefs.getInt("priceSize", priceSize)
+        barcodeLabelSize = layoutPrefs.getInt("barcodeLabelSize", barcodeLabelSize)
+        barcodeHeight = layoutPrefs.getInt("barcodeHeight", barcodeHeight)
+        barcodeScale = layoutPrefs.getInt("barcodeScale", barcodeScale)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.rgb(245, 245, 247))
@@ -145,10 +152,11 @@ class PrintEditorActivity : Activity() {
         body.addView(nonMemberPriceInput)
 
         body.addView(sectionTitle("4. 調整版面元素大小"))
-        body.addView(sizeControl("商品名字體", 12, 40, nameSize) { nameSize = it; preview.invalidate() })
-        body.addView(sizeControl("價格字體", 20, 86, priceSize) { priceSize = it; preview.invalidate() })
-        body.addView(sizeControl("條碼高度", 25, 90, barcodeHeight) { barcodeHeight = it; preview.invalidate() })
-        body.addView(sizeControl("條碼寬度", 40, 100, barcodeScale) { barcodeScale = it; preview.invalidate() })
+        body.addView(sizeControl("商品名字體", 12, 40, nameSize) { nameSize = it; saveLayout(); preview.invalidate() })
+        body.addView(sizeControl("價格字體", 20, 86, priceSize) { priceSize = it; saveLayout(); preview.invalidate() })
+        body.addView(sizeControl("條碼數字字體", 10, 30, barcodeLabelSize) { barcodeLabelSize = it; saveLayout(); preview.invalidate() })
+        body.addView(sizeControl("條碼高度", 25, 90, barcodeHeight) { barcodeHeight = it; saveLayout(); preview.invalidate() })
+        body.addView(sizeControl("條碼寬度", 40, 100, barcodeScale) { barcodeScale = it; saveLayout(); preview.invalidate() })
 
         val actionRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         sizeLabel = TextView(this).apply { text = "畫布：70 × 40 mm"; textSize = 14f; setTextColor(Color.DKGRAY) }
@@ -179,7 +187,7 @@ class PrintEditorActivity : Activity() {
             LabelPreviewView.LabelData(
                 nameInput.text.toString(), barcodeInput.text.toString(), priceInput.text.toString(),
                 memberPriceInput.text.toString(), nonMemberPriceInput.text.toString(), memberMode.isChecked,
-                nameSize, priceSize, barcodeHeight, barcodeScale
+                nameSize, priceSize, barcodeLabelSize, barcodeHeight, barcodeScale
             )
         }
     }
@@ -226,6 +234,15 @@ class PrintEditorActivity : Activity() {
     }
 
     private fun showNotReady(message: String) = android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show()
+    private fun saveLayout() {
+        getSharedPreferences("printLayout", MODE_PRIVATE).edit()
+            .putInt("nameSize", nameSize)
+            .putInt("priceSize", priceSize)
+            .putInt("barcodeLabelSize", barcodeLabelSize)
+            .putInt("barcodeHeight", barcodeHeight)
+            .putInt("barcodeScale", barcodeScale)
+            .apply()
+    }
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     private class LabelPreviewView(context: Context) : View(context) {
@@ -238,6 +255,7 @@ class PrintEditorActivity : Activity() {
             val showMember: Boolean,
             val nameSize: Int = 28,
             val priceSize: Int = 58,
+            val barcodeLabelSize: Int = 17,
             val barcodeHeight: Int = 58,
             val barcodeScale: Int = 72
         )
@@ -274,9 +292,10 @@ class PrintEditorActivity : Activity() {
                         canvas.drawRect(bx + i * module, by, bx + (i + 1) * module, by + bh, paint)
                     }
                 }
-                paint.textSize = scale * 0.17f
+                paint.textSize = scale * d.barcodeLabelSize / 40f
                 paint.typeface = android.graphics.Typeface.DEFAULT
-                canvas.drawText(encoded.display, bx + bw / 2f, by + bh + scale * 0.25f, paint)
+                val humanReadable = encoded.display.takeLast(6)
+                canvas.drawText(humanReadable, bx + bw / 2f, by + bh + scale * 0.25f, paint)
             } else {
                 paint.style = Paint.Style.STROKE
                 paint.color = Color.rgb(190, 45, 45)

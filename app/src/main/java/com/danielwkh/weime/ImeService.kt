@@ -268,10 +268,28 @@ class ImeService : InputMethodService(), LifecycleOwner {
         midFrame = FrameLayout(this)
 
         // 工具欄：剪貼板、簡繁、表情、語音、設定
-        toolbar = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        toolbar = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            isFillViewport = false
+            overScrollMode = View.OVER_SCROLL_ALWAYS
+            setOnTouchListener { _, ev ->
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
+                        kbRoot.suppress = true
+                        parent?.requestDisallowInterceptTouchEvent(true)
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        kbRoot.suppress = false
+                        parent?.requestDisallowInterceptTouchEvent(false)
+                    }
+                }
+                false
+            }
+        }
         val tools = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(Color.parseColor("#202124"))
+            layoutParams = HorizontalScrollView.LayoutParams(-2, -1)
         }
         fun tool(label: String, size: Float, click: () -> Unit): TextView {
             val t = cell(label, size, "#303134", Color.LTGRAY, click).apply {
