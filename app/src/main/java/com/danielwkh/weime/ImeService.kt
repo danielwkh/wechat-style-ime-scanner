@@ -289,7 +289,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         val tools = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(Color.parseColor("#202124"))
-            layoutParams = HorizontalScrollView.LayoutParams(-2, -1)
+            layoutParams = FrameLayout.LayoutParams(-2, -1)
         }
         fun tool(label: String, size: Float, click: () -> Unit): TextView {
             val t = cell(label, size, "#303134", Color.LTGRAY, click).apply {
