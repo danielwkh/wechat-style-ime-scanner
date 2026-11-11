@@ -91,11 +91,13 @@ object ProductDb {
             f.forEachLine { line ->
                 val fields = line.split('\t', limit = 5)
                 if (fields.size >= 2 && fields[0].isNotBlank()) {
+                    val storedPrice = fields.getOrNull(2).orEmpty()
+                    val storedNonMemberPrice = fields.getOrNull(4).orEmpty().ifBlank { storedPrice }
                     m[fields[0]] = Product(
                         name = fields.getOrNull(1).orEmpty(),
-                        price = fields.getOrNull(2).orEmpty(),
+                        price = storedPrice.ifBlank { storedNonMemberPrice },
                         memberPrice = fields.getOrNull(3).orEmpty(),
-                        nonMemberPrice = fields.getOrNull(4).orEmpty().ifBlank { fields.getOrNull(2).orEmpty() }
+                        nonMemberPrice = storedNonMemberPrice
                     )
                 }
             }
@@ -143,7 +145,11 @@ object ProductDb {
         val matches = findMatches(ctx, code)
         val match = if (selectedName == null) matches.singleOrNull()
         else matches.firstOrNull { it.name == selectedName }
-        return match?.let { Product(it.name, it.price, it.memberPrice, it.nonMemberPrice) }
+        return match?.let {
+            val effectivePrice = it.price.ifBlank { it.nonMemberPrice }
+            val effectiveNonMemberPrice = it.nonMemberPrice.ifBlank { effectivePrice }
+            Product(it.name, effectivePrice, it.memberPrice, effectiveNonMemberPrice)
+        }
     }
 
     /** 用工作表前幾十列判斷哪些欄是條碼、哪一欄是名稱；找不到就回傳 null。 */
@@ -246,15 +252,17 @@ object ProductDb {
                 XlsxReader.forEachRow(z, plan.entry, shared) { r ->
                     val name = r.getOrNull(plan.nameCol)?.trim().orEmpty()
                     if (name.isNotEmpty() && isTextual(name)) {
-                        val price = r.getOrNull(plan.priceCol)?.trim().orEmpty().ifBlank {
+                        val explicitNonMemberPrice = r.getOrNull(plan.nonMemberPriceCol)?.trim().orEmpty()
+                        val detectedPrice = r.getOrNull(plan.priceCol)?.trim().orEmpty().ifBlank {
                             r.withIndex().firstOrNull { (index, value) ->
                                 index !in plan.codeCols && index != plan.memberPriceCol &&
                                     index != plan.nonMemberPriceCol && isMoneyLike(value)
                             }?.value?.trim().orEmpty()
                         }
+                        val price = detectedPrice.ifBlank { explicitNonMemberPrice }
                         val memberPrice = r.getOrNull(plan.memberPriceCol)?.trim().orEmpty()
                         // 非會員價就是售價／原價；保留舊版獨立欄位作為相容 fallback。
-                        val nonMemberPrice = r.getOrNull(plan.nonMemberPriceCol)?.trim().orEmpty().ifBlank { price }
+                        val nonMemberPrice = explicitNonMemberPrice.ifBlank { price }
                         for (c in plan.codeCols) {
                             val code = r.getOrNull(c)?.trim().orEmpty()
                             val k = codeBase(code)

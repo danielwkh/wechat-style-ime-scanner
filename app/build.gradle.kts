@@ -32,6 +32,7 @@ android {
 }
 
 dependencies {
+    implementation(files("libs/LPAPI-2026-10-21-R.jar"))
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-ktx:1.9.1")
     val camerax = "1.3.4"

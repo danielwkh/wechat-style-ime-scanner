@@ -179,6 +179,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private var lastOcr = 0L
     private var lastLookupHint = 0L
     private var outName = false          // false＝輸出條碼數字，true＝輸出商品名
+    private var scanClearEnabled = true  // 掃描後是否先清除輸入框原有內容
     private lateinit var outBtn: TextView
 
     // 頂部工具欄／剪貼板／表情／簡繁
@@ -188,6 +189,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private lateinit var clipChip: LinearLayout
     private lateinit var clipChipText: TextView
     private lateinit var convBtn: TextView
+    private lateinit var scanClearBtn: TextView
     private lateinit var extraPanel: FrameLayout
     private var notice = false
     private var simplified = false
@@ -227,6 +229,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         lastLetterMode = prefs.getInt("last", 0)
         shift = prefs.getBoolean("shift", false)
         outName = prefs.getBoolean("outName", false)
+        scanClearEnabled = prefs.getBoolean("scanClearEnabled", true)
         simplified = prefs.getBoolean("simp", false)
         loadClips()
         try { cm.addPrimaryClipChangedListener(clipListener) } catch (_: Exception) {}
@@ -325,8 +328,25 @@ class ImeService : InputMethodService(), LifecycleOwner {
             tools.addView(t, LinearLayout.LayoutParams(dp(34), dp(34)).apply { setMargins(dp(3), 0, dp(3), 0) })
             return t
         }
+        fun scanClearTool(): TextView {
+            val t = cell("", 10f, "#303134", Color.LTGRAY) {
+                scanClearEnabled = !scanClearEnabled
+                prefs.edit().putBoolean("scanClearEnabled", scanClearEnabled).apply()
+                updateScanClearButton()
+            }.apply {
+                gravity = Gravity.CENTER
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.parseColor("#303134"))
+                }
+            }
+            tools.addView(t, LinearLayout.LayoutParams(dp(46), dp(34)).apply { setMargins(dp(3), 0, dp(3), 0) })
+            return t
+        }
         tool("📷", 15f) { toggleScan() }
         tool("🖨", 15f) { openPrintEditor() }
+        scanClearBtn = scanClearTool()
+        updateScanClearButton()
         tool("📋", 15f) { openClipPanel() }
         convBtn = tool(if (simplified) "简" else "繁", 15f) { toggleSimplified() }
         tool("😀", 15f) { openEmojiPanel(1) }
@@ -1855,6 +1875,12 @@ class ImeService : InputMethodService(), LifecycleOwner {
         startActivity(Intent(this, SettingsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
+    private fun updateScanClearButton() {
+        if (!::scanClearBtn.isInitialized) return
+        scanClearBtn.text = if (scanClearEnabled) "清除\nON" else "保留\nOFF"
+        scanClearBtn.setTextColor(if (scanClearEnabled) Color.WHITE else Color.LTGRAY)
+    }
+
     private fun openPrintEditor() {
         commitAll()
         startActivity(Intent(this, PrintEditorActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -2351,7 +2377,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         handler.postDelayed({ notice = false; showCands() }, 4000)
     }
 
-    /** 掃到後：清除輸入框全部內容 → 貼上（數字或商品名）→ 執行輸入動作（Enter／搜尋／送出）。 */
+    /** 掃到後依開關清除或保留原內容，再貼上數字／商品名並執行輸入動作。 */
     private fun onScanned(code: String, selectedName: String? = null) {
         stopScan()
         stopDelRepeat()
@@ -2374,7 +2400,14 @@ class ImeService : InputMethodService(), LifecycleOwner {
                 else "商品庫(${ProductDb.count(this)}筆)找不到 $code，已輸出數字"
             )
         }
-        if (!replaceAll(text)) return
+        val emitted = if (scanClearEnabled) {
+            replaceAll(text)
+        } else {
+            val connection = ic ?: return
+            connection.commitText(text, 1)
+            true
+        }
+        if (!emitted) return
         // 等輸入框把新內容處理完，再觸發 Enter／搜尋／送出（只觸發一次）
         handler.postDelayed({ onEnter() }, 200)
     }

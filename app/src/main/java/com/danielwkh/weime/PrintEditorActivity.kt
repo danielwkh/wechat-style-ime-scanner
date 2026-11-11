@@ -1,11 +1,18 @@
 package com.danielwkh.weime
 
 import android.app.Activity
+import android.Manifest
+import android.app.AlertDialog
+import android.bluetooth.BluetoothAdapter
 import android.content.Context
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
@@ -23,6 +30,10 @@ import android.widget.ArrayAdapter
 import android.widget.AdapterView
 import android.widget.SeekBar
 import android.widget.TextView
+import android.widget.Toast
+import com.dothantech.printer.IDzPrinter.PrintProgress
+import com.dothantech.printer.IDzPrinter.PrinterAddress
+import com.dothantech.printer.IDzPrinter.PrinterState
 import kotlin.math.hypot
 import kotlin.math.min
 
@@ -44,6 +55,14 @@ class PrintEditorActivity : Activity() {
     private var barcodeLabelSize = 17
     private var barcodeHeight = 58
     private var barcodeScale = 72
+    private lateinit var printerManager: DtPrinterManager
+    private lateinit var printerButton: Button
+    private val discoveredPrinters = LinkedHashMap<String, PrinterAddress>()
+    private var printCopies = 1
+    private var printDirection = 0
+    private var printGapLength = 3
+    private var printDensity = -1
+    private var printSpeed = -1
 
     private enum class PrintDevice(val label: String, val widthMm: Int, val heightMm: Int) {
         P1("P1／P1P  70 × 40 mm", 70, 40),
@@ -53,6 +72,37 @@ class PrintEditorActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         title = "列印標籤"
+        printerManager = DtPrinterManager(this, object : DtPrinterManager.Listener {
+            override fun onPrinterDiscovered(address: PrinterAddress) {
+                runOnUiThread {
+                    val key = address.macAddress ?: address.shownName ?: return@runOnUiThread
+                    discoveredPrinters[key] = address
+                }
+            }
+
+            override fun onPrinterState(address: PrinterAddress?, state: PrinterState) {
+                runOnUiThread {
+                    when (state) {
+                        PrinterState.Connected, PrinterState.Connected2 -> {
+                            printerButton.text = "已連線：${printerManager.printerName()}"
+                            toast("印表機連線成功")
+                        }
+                        PrinterState.Disconnected -> {
+                            printerButton.text = "選擇印表機"
+                            toast("印表機已斷線")
+                        }
+                        else -> Unit
+                    }
+                }
+            }
+
+            override fun onPrintProgress(progress: PrintProgress) {
+                runOnUiThread {
+                    if (progress == PrintProgress.Success) toast("列印完成")
+                    if (progress == PrintProgress.Failed) toast("列印失敗")
+                }
+            }
+        })
         val draftPrefs = getSharedPreferences("kb", MODE_PRIVATE)
         val draftBarcode = draftPrefs.getString("printBarcode", "").orEmpty()
         val draftName = draftPrefs.getString("printName", "").orEmpty()
@@ -89,7 +139,7 @@ class PrintEditorActivity : Activity() {
         }, LinearLayout.LayoutParams(0, dp(44), 1f))
         header.addView(Button(this).apply {
             text = "列印"
-            setOnClickListener { showNotReady("列印連線功能下一階段接入 DT Android SDK") }
+            setOnClickListener { printCurrentLabel() }
         }, LinearLayout.LayoutParams(dp(76), dp(44)))
         root.addView(header)
 
@@ -193,6 +243,39 @@ class PrintEditorActivity : Activity() {
         body.addView(sizeControl("條碼高度", 25, 90, barcodeHeight) { barcodeHeight = it; saveLayout(); preview.invalidate() })
         body.addView(sizeControl("條碼寬度", 40, 100, barcodeScale) { barcodeScale = it; saveLayout(); preview.invalidate() })
 
+        body.addView(sectionTitle("5. 列印參數"))
+        val copiesInput = field("列印份數", printCopies.toString()).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setOnFocusChangeListener { _, hasFocus ->
+                if (!hasFocus) printCopies = text.toString().toIntOrNull()?.coerceIn(1, 999) ?: 1
+            }
+        }
+        body.addView(copiesInput)
+        val gapInput = field("間隔長度（mm）", printGapLength.toString()).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setOnFocusChangeListener { _, hasFocus ->
+                if (!hasFocus) printGapLength = text.toString().toIntOrNull()?.coerceIn(0, 50) ?: 3
+            }
+        }
+        body.addView(gapInput)
+        val direction = Spinner(this).apply {
+            adapter = ArrayAdapter(this@PrintEditorActivity, android.R.layout.simple_spinner_dropdown_item,
+                listOf("出紙方向：0°", "出紙方向：90°", "出紙方向：180°", "出紙方向：270°"))
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    printDirection = position * 90
+                }
+            }
+        }
+        body.addView(direction, LinearLayout.LayoutParams(-1, dp(48)))
+        body.addView(sizeControl("列印濃度", 0, 20, if (printDensity < 0) 0 else printDensity) {
+            printDensity = if (it == 0) -1 else it
+        })
+        body.addView(sizeControl("列印速度", 0, 5, if (printSpeed < 0) 0 else printSpeed) {
+            printSpeed = if (it == 0) -1 else it
+        })
+
         val actionRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         sizeLabel = TextView(this).apply { text = "畫布：70 × 40 mm"; textSize = 14f; setTextColor(Color.DKGRAY) }
         actionRow.addView(sizeLabel, LinearLayout.LayoutParams(0, dp(48), 1f))
@@ -201,10 +284,11 @@ class PrintEditorActivity : Activity() {
             setOnClickListener { preview.invalidate() }
         }, LinearLayout.LayoutParams(dp(120), dp(48)))
         body.addView(actionRow)
-        body.addView(Button(this).apply {
-            text = "選擇印表機（尚未連線）"
-            setOnClickListener { showNotReady("印表機搜尋功能下一階段接入 DT Android SDK") }
-        })
+        printerButton = Button(this).apply {
+            text = "選擇印表機"
+            setOnClickListener { discoverPrinters() }
+        }
+        body.addView(printerButton)
 
         root.addView(ScrollView(this).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
@@ -268,6 +352,86 @@ class PrintEditorActivity : Activity() {
         return row
     }
 
+    private fun discoverPrinters() {
+        val adapter = BluetoothAdapter.getDefaultAdapter()
+        if (adapter == null) {
+            toast("此裝置不支援藍牙")
+            return
+        }
+        val permissions = if (android.os.Build.VERSION.SDK_INT >= 31) {
+            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+        }
+        val missing = permissions.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) {
+            requestPermissions(missing.toTypedArray(), 410)
+            return
+        }
+        if (!adapter.isEnabled) {
+            toast("請先開啟藍牙")
+            return
+        }
+        discoveredPrinters.clear()
+        printerButton.text = "搜尋印表機中…"
+        printerManager.discover()
+        Handler(Looper.getMainLooper()).postDelayed({ showPrinterChoices() }, 1800)
+    }
+
+    private fun showPrinterChoices() {
+        printerManager.stopDiscovery()
+        val entries = discoveredPrinters.values.toList()
+        if (entries.isEmpty()) {
+            printerButton.text = "選擇印表機"
+            toast("找不到印表機，請確認印表機已開機並靠近手機")
+            return
+        }
+        val labels = entries.map { it.shownName?.takeIf(String::isNotBlank) ?: it.macAddress.orEmpty() }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("選擇印表機")
+            .setItems(labels) { _, which ->
+                val selected = entries[which]
+                printerButton.text = "連線中…"
+                if (!printerManager.connect(selected)) {
+                    printerButton.text = "選擇印表機"
+                    toast("無法提交連線要求")
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun printCurrentLabel() {
+        if (!printerManager.isConnected()) {
+            toast("請先選擇並連線印表機")
+            discoverPrinters()
+            return
+        }
+        val bitmap = preview.renderBitmap()
+        val submitted = printerManager.print(
+            bitmap = bitmap,
+            copies = printCopies,
+            direction = printDirection,
+            gapLength = printGapLength,
+            density = printDensity,
+            speed = printSpeed,
+        )
+        if (!submitted) toast("列印要求未能送出")
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 410 && grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+            discoverPrinters()
+        }
+    }
+
+    override fun onDestroy() {
+        if (::printerManager.isInitialized) printerManager.close()
+        super.onDestroy()
+    }
+
+    private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     private fun showNotReady(message: String) = android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show()
     private fun saveLayout() {
         getSharedPreferences("printLayout", MODE_PRIVATE).edit()
@@ -306,6 +470,16 @@ class PrintEditorActivity : Activity() {
         private var baseScale = 1f
         private var lastCanvas = floatArrayOf(0f, 0f, 0f, 0f)
         private var lastRects: Map<Element, FloatArray> = emptyMap()
+        private var showSelection = true
+
+        fun renderBitmap(): Bitmap {
+            val output = Bitmap.createBitmap(width.coerceAtLeast(1), height.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+            val outputCanvas = Canvas(output)
+            showSelection = false
+            draw(outputCanvas)
+            showSelection = true
+            return output
+        }
 
         fun toggleInvertSelected() {
             val tr = transforms.getValue(selected)
@@ -351,10 +525,17 @@ class PrintEditorActivity : Activity() {
             val bw = min(w * d.barcodeScale / 100f, w * 0.84f)
             val by = top + h * 0.27f
             val requestedBarcodeHeight = h * d.barcodeHeight / 100f
-            val labelReserve = scale * 0.58f
+            val barcodeLabelSizePx = scale * d.barcodeLabelSize / 40f
+            paint.textSize = barcodeLabelSizePx
+            val labelMetrics = paint.fontMetrics
+            val labelGap = scale * 0.08f
+            val labelReserve = maxOf(
+                scale * 0.58f,
+                labelGap + (labelMetrics.descent - labelMetrics.ascent) + scale * 0.12f
+            )
             val bh = min(requestedBarcodeHeight, (top + h - by - labelReserve).coerceAtLeast(scale * 0.35f))
-            val barcodeLabelBaseline = by + bh + scale * 0.28f
-            val barcodeRect = floatArrayOf(bx, by, bx + bw, barcodeLabelBaseline + scale * 0.12f)
+            val barcodeLabelBaseline = by + bh + labelGap - labelMetrics.ascent
+            val barcodeRect = floatArrayOf(bx, by, bx + bw, by + bh + labelReserve)
             val priceRect = floatArrayOf(left + w * 0.48f, top + h * 0.48f, left + w - scale * 0.15f, top + h - scale * 0.12f)
             lastRects = mapOf(Element.NAME to nameRect, Element.BARCODE to barcodeRect, Element.PRICE to priceRect)
 
@@ -371,7 +552,7 @@ class PrintEditorActivity : Activity() {
                     for (i in encoded.bits.indices) if (encoded.bits[i] == '1') {
                         canvas.drawRect(bx + i * module, by, bx + (i + 1) * module, by + bh, paint)
                     }
-                    paint.textSize = scale * d.barcodeLabelSize / 40f
+                    paint.textSize = barcodeLabelSizePx
                     paint.typeface = android.graphics.Typeface.DEFAULT
                     canvas.drawText(encoded.display.takeLast(6), bx + bw / 2f, barcodeLabelBaseline, paint)
                 } else {
@@ -388,21 +569,21 @@ class PrintEditorActivity : Activity() {
                 paint.typeface = android.graphics.Typeface.DEFAULT_BOLD
                 if (d.showMember) {
                     paint.textAlign = Paint.Align.RIGHT
-                    canvas.drawText("$${d.member.ifBlank { "0" }}", left + w - scale * 0.25f, top + h * 0.65f, paint)
+                    canvas.drawText(d.member.ifBlank { "—" }.let { if (it == "—") it else "$${it}" }, left + w - scale * 0.25f, top + h * 0.65f, paint)
                     paint.textSize = scale * 0.28f; paint.typeface = android.graphics.Typeface.DEFAULT
                     canvas.drawText("會員價", left + w - scale * 2.0f, top + h * 0.64f, paint)
                     paint.textSize = scale * d.priceSize / 40f; paint.typeface = android.graphics.Typeface.DEFAULT_BOLD
-                    canvas.drawText("$${d.nonMember.ifBlank { "0" }}", left + w - scale * 0.25f, top + h * 0.88f, paint)
+                    canvas.drawText(d.nonMember.ifBlank { "—" }.let { if (it == "—") it else "$${it}" }, left + w - scale * 0.25f, top + h * 0.88f, paint)
                     paint.textSize = scale * 0.28f; paint.typeface = android.graphics.Typeface.DEFAULT
                     canvas.drawText("非會員價", left + w - scale * 2.0f, top + h * 0.87f, paint)
                 } else {
                     paint.textAlign = Paint.Align.CENTER
-                    canvas.drawText("$${d.price.ifBlank { "0" }}", left + w * 0.74f, top + h * 0.82f, paint)
+                    canvas.drawText(d.price.ifBlank { "—" }.let { if (it == "—") it else "$${it}" }, left + w * 0.74f, top + h * 0.82f, paint)
                 }
             }
             paint.style = Paint.Style.STROKE; paint.strokeWidth = 2f; paint.color = Color.LTGRAY
             canvas.drawRect(left, top, left + w, top + h, paint)
-            drawSelection(canvas, selected, nameRect, barcodeRect, priceRect)
+            if (showSelection) drawSelection(canvas, selected, nameRect, barcodeRect, priceRect)
         }
 
         private fun withTransform(canvas: Canvas, element: Element, l: Float, t: Float, r: Float, b: Float, draw: () -> Unit) {
@@ -438,8 +619,10 @@ class PrintEditorActivity : Activity() {
             val pad = dp(10f); val s = min((width - pad * 2) / 7f, (height - pad * 2) / 4f); val w = 7f * s; val h = 4f * s
             val l = (width - w) / 2f; val t = (height - h) / 2f
             val barcodeTop = t + h * 0.27f
-            val barcodeHeight = min(h * data.barcodeHeight / 100f, (t + h - barcodeTop - s * 0.58f).coerceAtLeast(s * 0.35f))
-            val barcode = floatArrayOf(l + w * 0.08f, barcodeTop, l + w * 0.08f + min(w * data.barcodeScale / 100f, w * 0.84f), barcodeTop + barcodeHeight + s * 0.40f)
+            val barcodeLabelSizePx = s * data.barcodeLabelSize / 40f
+            val labelReserve = maxOf(s * 0.58f, barcodeLabelSizePx * 1.5f)
+            val barcodeHeight = min(h * data.barcodeHeight / 100f, (t + h - barcodeTop - labelReserve).coerceAtLeast(s * 0.35f))
+            val barcode = floatArrayOf(l + w * 0.08f, barcodeTop, l + w * 0.08f + min(w * data.barcodeScale / 100f, w * 0.84f), barcodeTop + barcodeHeight + labelReserve)
             val hitElement = hit(event.x, event.y, l + s * 0.35f, t + s * 0.18f, l + w - s * 0.35f, t + s * 0.82f, barcode, l + w * 0.48f, t + h * 0.48f, l + w - s * 0.15f, t + h - s * 0.12f)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> { selected = hitElement; lastX = event.x; lastY = event.y; invalidate() }
