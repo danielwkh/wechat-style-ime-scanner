@@ -23,7 +23,6 @@ import android.widget.ArrayAdapter
 import android.widget.AdapterView
 import android.widget.SeekBar
 import android.widget.TextView
-import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.min
 
@@ -60,6 +59,7 @@ class PrintEditorActivity : Activity() {
         val draftPrice = draftPrefs.getString("printPrice", "").orEmpty()
         val draftMemberPrice = draftPrefs.getString("printMemberPrice", "").orEmpty()
         val draftNonMemberPrice = draftPrefs.getString("printNonMemberPrice", "").orEmpty()
+        val effectivePrice = draftPrice.ifBlank { draftNonMemberPrice }
             .ifBlank { draftPrice }
         val layoutPrefs = getSharedPreferences("printLayout", MODE_PRIVATE)
         nameSize = layoutPrefs.getInt("nameSize", nameSize)
@@ -98,7 +98,7 @@ class PrintEditorActivity : Activity() {
             setMargins(dp(12), dp(12), dp(12), dp(8))
         })
         root.addView(TextView(this).apply {
-            text = "點選商品名、條碼或價格後拖曳；雙指可縮放及旋轉"
+            text = "點選商品名、條碼或價格後拖曳；雙指只可縮放"
             textSize = 13f
             setTextColor(Color.DKGRAY)
             gravity = Gravity.CENTER
@@ -117,7 +117,6 @@ class PrintEditorActivity : Activity() {
         toolRow.addView(canvasButton("左對齊") { preview.alignSelected("left") }, LinearLayout.LayoutParams(0, dp(42), 1f))
         toolRow.addView(canvasButton("水平置中") { preview.alignSelected("center") }, LinearLayout.LayoutParams(0, dp(42), 1f))
         toolRow.addView(canvasButton("右對齊") { preview.alignSelected("right") }, LinearLayout.LayoutParams(0, dp(42), 1f))
-        toolRow.addView(canvasButton("旋轉 90°") { preview.rotateSelected() }, LinearLayout.LayoutParams(0, dp(42), 1f))
         canvasTools.addView(toolRow)
         val toolRow2 = LinearLayout(this).apply { gravity = Gravity.CENTER }
         toolRow2.addView(canvasButton("頂端") { preview.alignSelected("top") }, LinearLayout.LayoutParams(0, dp(42), 1f))
@@ -173,9 +172,9 @@ class PrintEditorActivity : Activity() {
         nameInput = field("商品名稱", draftName)
         barcodeInput = field("條碼", draftBarcode)
         barcodeInput.inputType = android.text.InputType.TYPE_CLASS_NUMBER
-        priceInput = field("價格", draftPrice)
+        priceInput = field("價格／非會員價", effectivePrice)
         memberPriceInput = field("會員價", draftMemberPrice)
-        nonMemberPriceInput = field("非會員價", draftNonMemberPrice)
+        nonMemberPriceInput = field("非會員價", draftNonMemberPrice.ifBlank { effectivePrice })
         val hasMemberPrices = draftMemberPrice.isNotBlank() || draftNonMemberPrice.isNotBlank()
         memberMode.isChecked = hasMemberPrices
         template.setSelection(if (hasMemberPrices) 1 else 0)
@@ -296,7 +295,7 @@ class PrintEditorActivity : Activity() {
             val barcodeHeight: Int = 58,
             val barcodeScale: Int = 72,
         )
-        private data class Transform(var dx: Float = 0f, var dy: Float = 0f, var scale: Float = 1f, var rotation: Float = 0f, var invert: Boolean = false)
+        private data class Transform(var dx: Float = 0f, var dy: Float = 0f, var scale: Float = 1f, var invert: Boolean = false)
         var read: (() -> LabelData)? = null
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         private val transforms = Element.values().associateWith { Transform() }.toMutableMap()
@@ -304,16 +303,9 @@ class PrintEditorActivity : Activity() {
         private var lastX = 0f
         private var lastY = 0f
         private var baseDistance = 1f
-        private var baseAngle = 0f
         private var baseScale = 1f
-        private var baseRotation = 0f
         private var lastCanvas = floatArrayOf(0f, 0f, 0f, 0f)
         private var lastRects: Map<Element, FloatArray> = emptyMap()
-
-        fun rotateSelected() {
-            transforms.getValue(selected).rotation = (transforms.getValue(selected).rotation + 90f) % 360f
-            invalidate()
-        }
 
         fun toggleInvertSelected() {
             val tr = transforms.getValue(selected)
@@ -358,8 +350,11 @@ class PrintEditorActivity : Activity() {
             val bx = left + w * 0.08f
             val bw = min(w * d.barcodeScale / 100f, w * 0.84f)
             val by = top + h * 0.27f
-            val bh = h * d.barcodeHeight / 100f
-            val barcodeRect = floatArrayOf(bx, by, bx + bw, by + bh + scale * 0.34f)
+            val requestedBarcodeHeight = h * d.barcodeHeight / 100f
+            val labelReserve = scale * 0.58f
+            val bh = min(requestedBarcodeHeight, (top + h - by - labelReserve).coerceAtLeast(scale * 0.35f))
+            val barcodeLabelBaseline = by + bh + scale * 0.28f
+            val barcodeRect = floatArrayOf(bx, by, bx + bw, barcodeLabelBaseline + scale * 0.12f)
             val priceRect = floatArrayOf(left + w * 0.48f, top + h * 0.48f, left + w - scale * 0.15f, top + h - scale * 0.12f)
             lastRects = mapOf(Element.NAME to nameRect, Element.BARCODE to barcodeRect, Element.PRICE to priceRect)
 
@@ -378,7 +373,7 @@ class PrintEditorActivity : Activity() {
                     }
                     paint.textSize = scale * d.barcodeLabelSize / 40f
                     paint.typeface = android.graphics.Typeface.DEFAULT
-                    canvas.drawText(encoded.display.takeLast(6), bx + bw / 2f, by + bh + scale * 0.25f, paint)
+                    canvas.drawText(encoded.display.takeLast(6), bx + bw / 2f, barcodeLabelBaseline, paint)
                 } else {
                     paint.style = Paint.Style.STROKE; paint.color = Color.rgb(190, 45, 45)
                     canvas.drawRect(bx, by, bx + bw, by + bh, paint)
@@ -415,7 +410,6 @@ class PrintEditorActivity : Activity() {
             val cx = (l + r) / 2f; val cy = (t + b) / 2f
             canvas.save()
             canvas.translate(tr.dx, tr.dy)
-            canvas.rotate(tr.rotation, cx, cy)
             canvas.scale(tr.scale, tr.scale, cx, cy)
             if (tr.invert) {
                 paint.style = Paint.Style.FILL
@@ -432,7 +426,7 @@ class PrintEditorActivity : Activity() {
         private fun drawSelection(canvas: Canvas, element: Element, name: FloatArray, barcode: FloatArray, price: FloatArray) {
             val rect = when (element) { Element.NAME -> name; Element.BARCODE -> barcode; Element.PRICE -> price }
             val tr = transforms.getValue(element)
-            canvas.save(); canvas.translate(tr.dx, tr.dy); canvas.rotate(tr.rotation, (rect[0] + rect[2]) / 2f, (rect[1] + rect[3]) / 2f)
+            canvas.save(); canvas.translate(tr.dx, tr.dy)
             canvas.scale(tr.scale, tr.scale, (rect[0] + rect[2]) / 2f, (rect[1] + rect[3]) / 2f)
             paint.style = Paint.Style.STROKE; paint.strokeWidth = dp(2f); paint.color = Color.rgb(40, 120, 230)
             canvas.drawRect(rect[0], rect[1], rect[2], rect[3], paint)
@@ -443,16 +437,18 @@ class PrintEditorActivity : Activity() {
             val data = read?.invoke() ?: return true
             val pad = dp(10f); val s = min((width - pad * 2) / 7f, (height - pad * 2) / 4f); val w = 7f * s; val h = 4f * s
             val l = (width - w) / 2f; val t = (height - h) / 2f
-            val barcode = floatArrayOf(l + w * 0.08f, t + h * 0.27f, l + w * 0.08f + min(w * data.barcodeScale / 100f, w * 0.84f), t + h * 0.27f + h * data.barcodeHeight / 100f + s * 0.34f)
+            val barcodeTop = t + h * 0.27f
+            val barcodeHeight = min(h * data.barcodeHeight / 100f, (t + h - barcodeTop - s * 0.58f).coerceAtLeast(s * 0.35f))
+            val barcode = floatArrayOf(l + w * 0.08f, barcodeTop, l + w * 0.08f + min(w * data.barcodeScale / 100f, w * 0.84f), barcodeTop + barcodeHeight + s * 0.40f)
             val hitElement = hit(event.x, event.y, l + s * 0.35f, t + s * 0.18f, l + w - s * 0.35f, t + s * 0.82f, barcode, l + w * 0.48f, t + h * 0.48f, l + w - s * 0.15f, t + h - s * 0.12f)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> { selected = hitElement; lastX = event.x; lastY = event.y; invalidate() }
                 MotionEvent.ACTION_POINTER_DOWN -> if (event.pointerCount >= 2) {
-                    baseDistance = distance(event); baseAngle = angle(event); val tr = transforms.getValue(selected); baseScale = tr.scale; baseRotation = tr.rotation
+                    baseDistance = distance(event); val tr = transforms.getValue(selected); baseScale = tr.scale
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val tr = transforms.getValue(selected)
-                    if (event.pointerCount >= 2 && baseDistance > 0f) { tr.scale = (baseScale * distance(event) / baseDistance).coerceIn(0.4f, 3f); tr.rotation = baseRotation + angle(event) - baseAngle }
+                    if (event.pointerCount >= 2 && baseDistance > 0f) { tr.scale = (baseScale * distance(event) / baseDistance).coerceIn(0.4f, 3f) }
                     else { tr.dx += event.x - lastX; tr.dy += event.y - lastY }
                     lastX = event.x; lastY = event.y; invalidate()
                 }
@@ -465,7 +461,6 @@ class PrintEditorActivity : Activity() {
             return when { x in b[0]..b[2] && y in b[1]..b[3] -> Element.BARCODE; x in pl..pr && y in pt..pb -> Element.PRICE; x in nl..nr && y in nt..nb -> Element.NAME; else -> selected }
         }
         private fun distance(e: MotionEvent) = hypot(e.getX(0) - e.getX(1), e.getY(0) - e.getY(1))
-        private fun angle(e: MotionEvent) = Math.toDegrees(atan2((e.getY(1) - e.getY(0)).toDouble(), (e.getX(1) - e.getX(0)).toDouble())).toFloat()
         private fun dp(v: Float) = v * resources.displayMetrics.density
     }
 }

@@ -81,6 +81,7 @@ object ProductDb {
 
     private fun isCode(v: String) = codeBase(v) != null
     private fun isTextual(v: String) = v.any { it.isLetter() }
+    private fun isMoneyLike(v: String): Boolean = v.trim().matches(Regex("^[€$¥£]?\\s*\\d+(?:[.,]\\d+)?\\s*$"))
 
     private fun get(ctx: Context): Map<String, Product> {
         map?.let { return it }
@@ -245,7 +246,12 @@ object ProductDb {
                 XlsxReader.forEachRow(z, plan.entry, shared) { r ->
                     val name = r.getOrNull(plan.nameCol)?.trim().orEmpty()
                     if (name.isNotEmpty() && isTextual(name)) {
-                        val price = r.getOrNull(plan.priceCol)?.trim().orEmpty()
+                        val price = r.getOrNull(plan.priceCol)?.trim().orEmpty().ifBlank {
+                            r.withIndex().firstOrNull { (index, value) ->
+                                index !in plan.codeCols && index != plan.memberPriceCol &&
+                                    index != plan.nonMemberPriceCol && isMoneyLike(value)
+                            }?.value?.trim().orEmpty()
+                        }
                         val memberPrice = r.getOrNull(plan.memberPriceCol)?.trim().orEmpty()
                         // 非會員價就是售價／原價；保留舊版獨立欄位作為相容 fallback。
                         val nonMemberPrice = r.getOrNull(plan.nonMemberPriceCol)?.trim().orEmpty().ifBlank { price }
