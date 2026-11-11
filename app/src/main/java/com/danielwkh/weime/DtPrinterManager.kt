@@ -20,7 +20,7 @@ class DtPrinterManager(
         fun onPrintProgress(progress: PrintProgress)
     }
 
-    private val api: LPAPI = LPAPI.Factory.createInstance(object : LPAPI.Callback() {
+    private val api: LPAPI = LPAPI.Factory.createInstance(object : LPAPI.Callback {
         override fun onStateChange(address: PrinterAddress, state: PrinterState) {
             listener.onPrinterState(address, state)
         }
