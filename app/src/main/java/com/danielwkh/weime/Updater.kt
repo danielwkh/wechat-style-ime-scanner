@@ -2,6 +2,7 @@ package com.danielwkh.weime
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import androidx.core.content.FileProvider
 import org.json.JSONObject
 import java.io.File
@@ -16,6 +17,11 @@ object Updater {
 
     fun currentVersion(ctx: Context): String =
         ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "0"
+
+    fun currentVersionCode(ctx: Context): Long {
+        val info = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else info.versionCode.toLong()
+    }
 
     fun fetchLatest(): Release {
         val conn = URL("https://api.github.com/repos/$REPO/releases/latest").openConnection() as HttpURLConnection
@@ -86,7 +92,7 @@ object Updater {
         return out
     }
 
-    /** 安裝前先檢查：長度完整、是 ZIP/APK、系統能解析、套件名稱正確。有問題就直接報錯，不交給系統安裝程式。 */
+    /** 安裝前先檢查：長度完整、是 ZIP/APK、系統能解析、套件名稱正確，且不會降級。有問題就直接報錯，不交給系統安裝程式。 */
     private fun verifyApk(ctx: Context, f: File, expected: Long) {
         if (expected > 0 && f.length() != expected) {
             f.delete()
@@ -107,6 +113,14 @@ object Updater {
         if (info.packageName != ctx.packageName) {
             f.delete()
             throw IllegalStateException("APK 套件名稱不符（${info.packageName}）")
+        }
+        val downloadedCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else info.versionCode.toLong()
+        val installedCode = currentVersionCode(ctx)
+        if (downloadedCode <= installedCode) {
+            f.delete()
+            throw IllegalStateException(
+                "下載版本代碼 $downloadedCode 不高於目前版本代碼 $installedCode，這是舊版或降級版本，已取消安裝"
+            )
         }
     }
 
