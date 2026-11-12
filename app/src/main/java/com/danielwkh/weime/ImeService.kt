@@ -355,7 +355,29 @@ class ImeService : InputMethodService(), LifecycleOwner {
         toolbar.addView(tools)
 
         // 候選字列
-        candScroll = HorizontalScrollView(this).apply {
+        candScroll = object : HorizontalScrollView(this@ImeService) {
+            override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
+                        kbRoot.suppress = true
+                        parent?.requestDisallowInterceptTouchEvent(true)
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        kbRoot.suppress = false
+                        parent?.requestDisallowInterceptTouchEvent(false)
+                    }
+                }
+                return super.dispatchTouchEvent(ev)
+            }
+
+            override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+                if (ev.actionMasked == MotionEvent.ACTION_DOWN || ev.actionMasked == MotionEvent.ACTION_MOVE) {
+                    kbRoot.suppress = true
+                    parent?.requestDisallowInterceptTouchEvent(true)
+                }
+                return super.onInterceptTouchEvent(ev)
+            }
+        }.apply {
             isHorizontalScrollBarEnabled = false
             visibility = View.GONE
         }
@@ -2242,10 +2264,15 @@ class ImeService : InputMethodService(), LifecycleOwner {
         }, LinearLayout.LayoutParams(-2, dp(46)))
         for (match in matches) {
             candBar.addView(TextView(this).apply {
-                text = match.name
-                textSize = 15f
+                val matchCode = match.code.filter { it.isDigit() }
+                text = "${match.name}\n後6碼 ${matchCode.takeLast(6)}"
+                textSize = 12f
                 setTextColor(Color.WHITE)
                 gravity = Gravity.CENTER
+                maxLines = 2
+                isClickable = true
+                isFocusable = true
+                contentDescription = "${match.name}，條碼後六碼 ${matchCode.takeLast(6)}"
                 setPadding(dp(12), 0, dp(12), 0)
                 background = GradientDrawable().apply {
                     setColor(Color.parseColor("#343638"))
@@ -2255,9 +2282,10 @@ class ImeService : InputMethodService(), LifecycleOwner {
                     choosingProduct = false
                     notice = false
                     showCands()
-                    onScanned(code, match.name)
+                    // 使用所選商品的完整條碼，讓列印預覽及條碼下方文字取正確末六位。
+                    onScanned(match.code, match.name)
                 }
-            }, LinearLayout.LayoutParams(-2, dp(42)).apply { setMargins(dp(3), dp(2), dp(3), dp(2)) })
+            }, LinearLayout.LayoutParams(-2, dp(44)).apply { setMargins(dp(3), dp(1), dp(3), dp(1)) })
         }
         choosingProduct = true
         notice = true
