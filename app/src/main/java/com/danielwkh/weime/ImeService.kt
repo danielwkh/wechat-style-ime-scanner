@@ -180,16 +180,20 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private var lastLookupHint = 0L
     private var outName = false          // false＝輸出條碼數字，true＝輸出商品名
     private var scanClearEnabled = true  // 掃描後是否先清除輸入框原有內容
+    private var fullCodeEnabled = false  // 掃描輸出完整條碼；關閉時只輸出末六碼
     private lateinit var outBtn: TextView
 
     // 頂部工具欄／剪貼板／表情／簡繁
     private lateinit var midFrame: FrameLayout
     private lateinit var toolbar: HorizontalScrollView
     private lateinit var candScroll: HorizontalScrollView
+    private lateinit var productCandScroll: ScrollView
+    private lateinit var productCandBar: LinearLayout
     private lateinit var clipChip: LinearLayout
     private lateinit var clipChipText: TextView
     private lateinit var convBtn: TextView
     private lateinit var scanClearBtn: TextView
+    private lateinit var fullCodeBtn: TextView
     private lateinit var extraPanel: FrameLayout
     private var notice = false
     private var simplified = false
@@ -230,6 +234,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         shift = prefs.getBoolean("shift", false)
         outName = prefs.getBoolean("outName", false)
         scanClearEnabled = prefs.getBoolean("scanClearEnabled", true)
+        fullCodeEnabled = prefs.getBoolean("fullCodeEnabled", false)
         simplified = prefs.getBoolean("simp", false)
         loadClips()
         try { cm.addPrimaryClipChangedListener(clipListener) } catch (_: Exception) {}
@@ -347,6 +352,19 @@ class ImeService : InputMethodService(), LifecycleOwner {
         tool("🖨", 15f) { openPrintEditor() }
         scanClearBtn = scanClearTool()
         updateScanClearButton()
+        fullCodeBtn = cell("", 10f, "#303134", Color.LTGRAY) {
+            fullCodeEnabled = !fullCodeEnabled
+            prefs.edit().putBoolean("fullCodeEnabled", fullCodeEnabled).apply()
+            updateFullCodeButton()
+        }.apply {
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#303134"))
+            }
+        }
+        tools.addView(fullCodeBtn, LinearLayout.LayoutParams(dp(46), dp(34)).apply { setMargins(dp(3), 0, dp(3), 0) })
+        updateFullCodeButton()
         tool("📋", 15f) { openClipPanel() }
         convBtn = tool(if (simplified) "简" else "繁", 15f) { toggleSimplified() }
         tool("😀", 15f) { openEmojiPanel(1) }
@@ -384,6 +402,28 @@ class ImeService : InputMethodService(), LifecycleOwner {
         candBar = LinearLayout(this)
         candScroll.addView(candBar)
 
+        productCandScroll = object : ScrollView(this@ImeService) {
+            override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
+                        kbRoot.suppress = true
+                        parent?.requestDisallowInterceptTouchEvent(true)
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        kbRoot.suppress = false
+                        parent?.requestDisallowInterceptTouchEvent(false)
+                    }
+                }
+                return super.dispatchTouchEvent(ev)
+            }
+        }.apply {
+            isVerticalScrollBarEnabled = true
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            visibility = View.GONE
+        }
+        productCandBar = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        productCandScroll.addView(productCandBar)
+
         // 剛複製的文字：顯示在工具欄位置，點文字貼上，∨ 開剪貼板，✕ 關閉
         clipChip = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
@@ -412,6 +452,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
         midFrame.addView(toolbar, FrameLayout.LayoutParams(-1, -1))
         midFrame.addView(candScroll, FrameLayout.LayoutParams(-1, -1))
+        midFrame.addView(productCandScroll, FrameLayout.LayoutParams(-1, -1))
         midFrame.addView(clipChip, FrameLayout.LayoutParams(-1, -1))
         top.addView(midFrame, LinearLayout.LayoutParams(0, dp(46), 1f))
 
@@ -1859,11 +1900,18 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private fun updateTop() {
         if (!::midFrame.isInitialized) return
         if (clipSuggest != null && SystemClock.elapsedRealtime() - clipTime > 180000) clipSuggest = null
-        val showCand = notice || comp.isNotEmpty()
+        val showProductCand = choosingProduct
+        val showCand = !showProductCand && (notice || comp.isNotEmpty())
         val showChip = !showCand && clipSuggest != null
         candScroll.visibility = if (showCand) View.VISIBLE else View.GONE
+        productCandScroll.visibility = if (showProductCand) View.VISIBLE else View.GONE
         clipChip.visibility = if (showChip) View.VISIBLE else View.GONE
-        toolbar.visibility = if (!showCand && !showChip) View.VISIBLE else View.GONE
+        toolbar.visibility = if (!showCand && !showProductCand && !showChip) View.VISIBLE else View.GONE
+        midFrame.layoutParams = (midFrame.layoutParams ?: LinearLayout.LayoutParams(0, dp(46), 1f)).apply {
+            height = if (showProductCand) dp(118) else dp(46)
+            weight = if (showProductCand) 0f else 1f
+        }
+        midFrame.requestLayout()
         if (showChip) clipChipText.text = clipSuggest!!.replace('\n', ' ')
     }
 
@@ -1901,6 +1949,12 @@ class ImeService : InputMethodService(), LifecycleOwner {
         if (!::scanClearBtn.isInitialized) return
         scanClearBtn.text = if (scanClearEnabled) "清除\nON" else "保留\nOFF"
         scanClearBtn.setTextColor(if (scanClearEnabled) Color.WHITE else Color.LTGRAY)
+    }
+
+    private fun updateFullCodeButton() {
+        if (!::fullCodeBtn.isInitialized) return
+        fullCodeBtn.text = if (fullCodeEnabled) "全碼\nON" else "全碼\nOFF"
+        fullCodeBtn.setTextColor(if (fullCodeEnabled) Color.WHITE else Color.LTGRAY)
     }
 
     private fun openPrintEditor() {
@@ -2254,21 +2308,21 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private fun showProductChoices(code: String, matches: List<ProductDb.Match>) {
         stopScan()
         stopDelRepeat()
-        candBar.removeAllViews()
-        candBar.addView(TextView(this).apply {
+        productCandBar.removeAllViews()
+        productCandBar.addView(TextView(this).apply {
             text = "選擇商品："
             textSize = 13f
             setTextColor(Color.LTGRAY)
-            gravity = Gravity.CENTER
-            setPadding(dp(8), 0, dp(6), 0)
-        }, LinearLayout.LayoutParams(-2, dp(46)))
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), 0, dp(6), 0)
+        }, LinearLayout.LayoutParams(-1, dp(28)))
         for (match in matches) {
-            candBar.addView(TextView(this).apply {
+            productCandBar.addView(TextView(this).apply {
                 val matchCode = match.code.filter { it.isDigit() }
                 text = "${match.name}\n後6碼 ${matchCode.takeLast(6)}"
                 textSize = 12f
                 setTextColor(Color.WHITE)
-                gravity = Gravity.CENTER
+                gravity = Gravity.CENTER_VERTICAL
                 maxLines = 2
                 isClickable = true
                 isFocusable = true
@@ -2285,7 +2339,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
                     // 使用所選商品的完整條碼，讓列印預覽及條碼下方文字取正確末六位。
                     onScanned(match.code, match.name)
                 }
-            }, LinearLayout.LayoutParams(-2, dp(44)).apply { setMargins(dp(3), dp(1), dp(3), dp(1)) })
+            }, LinearLayout.LayoutParams(-1, dp(44)).apply { setMargins(dp(4), dp(1), dp(4), dp(1)) })
         }
         choosingProduct = true
         notice = true
@@ -2409,12 +2463,14 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private fun onScanned(code: String, selectedName: String? = null) {
         stopScan()
         stopDelRepeat()
-        // 輸出碼照相機實際讀到的數字原樣輸出，不補足長度或改寫尾碼。
-        var text = code.filter { it.isDigit() }
+        // 鍵盤輸出依「全碼」開關決定；列印資料則永遠保存完整條碼，交由列印頁面獨立選擇。
+        val fullCode = code.filter { it.isDigit() }
+        var text = if (fullCodeEnabled) fullCode else fullCode.takeLast(6)
         val product = ProductDb.lookupProduct(this, code, selectedName)
         val productName = selectedName ?: product?.name
         prefs.edit()
-            .putString(PRINT_BARCODE_KEY, text)
+            .putString(PRINT_BARCODE_KEY, fullCode)
+            .putString("printFullBarcode", fullCode)
             .putString(PRINT_NAME_KEY, productName ?: "")
             .putString(PRINT_PRICE_KEY, product?.price ?: "")
             .putString(PRINT_MEMBER_PRICE_KEY, product?.memberPrice ?: "")

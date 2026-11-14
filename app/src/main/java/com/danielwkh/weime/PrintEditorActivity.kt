@@ -55,6 +55,8 @@ class PrintEditorActivity : Activity() {
     private var barcodeLabelSize = 17
     private var barcodeHeight = 58
     private var barcodeScale = 72
+    private var barcodeFull = true
+    private var fullBarcodeValue = ""
     private lateinit var printerManager: DtPrinterManager
     private lateinit var printerButton: Button
     private val discoveredPrinters = LinkedHashMap<String, PrinterAddress>()
@@ -105,6 +107,7 @@ class PrintEditorActivity : Activity() {
         })
         val draftPrefs = getSharedPreferences("kb", MODE_PRIVATE)
         val draftBarcode = draftPrefs.getString("printBarcode", "").orEmpty()
+        val draftFullBarcode = draftPrefs.getString("printFullBarcode", draftBarcode).orEmpty()
         val draftName = draftPrefs.getString("printName", "").orEmpty()
         val draftPrice = draftPrefs.getString("printPrice", "").orEmpty()
         val draftMemberPrice = draftPrefs.getString("printMemberPrice", "").orEmpty()
@@ -117,6 +120,9 @@ class PrintEditorActivity : Activity() {
         barcodeLabelSize = layoutPrefs.getInt("barcodeLabelSize", barcodeLabelSize)
         barcodeHeight = layoutPrefs.getInt("barcodeHeight", barcodeHeight)
         barcodeScale = layoutPrefs.getInt("barcodeScale", barcodeScale)
+        barcodeFull = layoutPrefs.getBoolean("barcodeFull", true)
+        fullBarcodeValue = draftFullBarcode.ifBlank { draftBarcode }
+        val barcodeDisplayValue = if (barcodeFull) fullBarcodeValue else fullBarcodeValue.takeLast(6)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.rgb(245, 245, 247))
@@ -220,8 +226,30 @@ class PrintEditorActivity : Activity() {
 
         body.addView(sectionTitle("3. 編輯內容"))
         nameInput = field("商品名稱", draftName)
-        barcodeInput = field("條碼", draftBarcode)
+        barcodeInput = field("條碼", barcodeDisplayValue)
         barcodeInput.inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        val barcodeMode = RadioGroup(this).apply {
+            orientation = RadioGroup.HORIZONTAL
+            addView(RadioButton(this@PrintEditorActivity).apply {
+                id = View.generateViewId()
+                text = "列印全碼"
+                tag = true
+            })
+            addView(RadioButton(this@PrintEditorActivity).apply {
+                id = View.generateViewId()
+                text = "只列印後六碼"
+                tag = false
+            })
+            setOnCheckedChangeListener { group, checkedId ->
+                barcodeFull = group.findViewById<RadioButton>(checkedId).tag as Boolean
+                layoutPrefs.edit().putBoolean("barcodeFull", barcodeFull).apply()
+                val value = if (barcodeFull) fullBarcodeValue else fullBarcodeValue.takeLast(6)
+                barcodeInput.setText(value)
+                barcodeInput.setSelection(value.length)
+                preview.invalidate()
+            }
+        }
+        (barcodeMode.getChildAt(if (barcodeFull) 0 else 1) as RadioButton).isChecked = true
         priceInput = field("價格／非會員價", effectivePrice)
         memberPriceInput = field("會員價", draftMemberPrice)
         nonMemberPriceInput = field("非會員價", draftNonMemberPrice.ifBlank { effectivePrice })
@@ -232,6 +260,7 @@ class PrintEditorActivity : Activity() {
         nonMemberPriceInput.visibility = if (hasMemberPrices) View.VISIBLE else View.GONE
         body.addView(nameInput)
         body.addView(barcodeInput)
+        body.addView(barcodeMode)
         body.addView(priceInput)
         body.addView(memberPriceInput)
         body.addView(nonMemberPriceInput)
@@ -301,6 +330,13 @@ class PrintEditorActivity : Activity() {
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { preview.invalidate() }
             override fun afterTextChanged(s: Editable?) = Unit
         }
+        barcodeInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                if (barcodeFull) fullBarcodeValue = s?.toString().orEmpty()
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
         listOf(nameInput, barcodeInput, priceInput, memberPriceInput, nonMemberPriceInput).forEach { it.addTextChangedListener(watcher) }
         preview.read = {
             LabelPreviewView.LabelData(
