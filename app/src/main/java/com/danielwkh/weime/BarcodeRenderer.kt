@@ -36,15 +36,16 @@ object BarcodeRenderer {
 
     fun encode(raw: String): Encoded? {
         val digits = raw.filter { it.isDigit() }
+        val display = raw.trim()
         return when (digits.length) {
-            8 -> encodeEan8(digits) ?: encodeCode128(digits)
-            12 -> encodeEan13("0$digits", digits) ?: encodeCode128(digits)
-            13 -> encodeEan13(digits, digits) ?: encodeCode128(digits)
-            else -> encodeCode128(digits)
+            8 -> encodeEan8(digits, display) ?: encodeCode128(digits, display)
+            12 -> encodeEan13("0$digits", display) ?: encodeCode128(digits, display)
+            13 -> encodeEan13(digits, display) ?: encodeCode128(digits, display)
+            else -> encodeCode128(digits, display)
         }
     }
 
-    private fun encodeCode128(value: String): Encoded? {
+    private fun encodeCode128(value: String, display: String = value): Encoded? {
         if (value.isEmpty() || value.any { it.code !in 32..126 }) return null
         val values = value.map { it.code - 32 }
         var checksum = 104
@@ -55,7 +56,7 @@ object BarcodeRenderer {
             append(CODE128_B[checksum % 103])
             append(CODE128_B[106])
         }
-        return Encoded(bits, value, "Code 128")
+        return Encoded(bits, display, "Code 128")
     }
 
     private fun encodeEan13(full: String, display: String): Encoded? {
@@ -73,11 +74,11 @@ object BarcodeRenderer {
         return Encoded("101$left" + "01010" + right + "101", display, "EAN-13")
     }
 
-    private fun encodeEan8(digits: String): Encoded? {
+    private fun encodeEan8(digits: String, display: String): Encoded? {
         if (digits.length != 8 || checksum(digits.substring(0, 7)) != digits[7] - '0') return null
         val left = buildString { for (i in 0 until 4) append(L, digits[i] - '0') }
         val right = buildString { for (i in 4 until 8) append(R, digits[i] - '0') }
-        return Encoded("101$left" + "01010" + right + "101", digits, "EAN-8")
+        return Encoded("101$left" + "01010" + right + "101", display, "EAN-8")
     }
 
     private fun checksum(body: String): Int {

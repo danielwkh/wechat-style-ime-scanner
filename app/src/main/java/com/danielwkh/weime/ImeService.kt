@@ -2319,7 +2319,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         }, LinearLayout.LayoutParams(-1, dp(28)))
         for (match in matches) {
             productCandBar.addView(TextView(this).apply {
-                val matchCode = match.code.filter { it.isDigit() }
+                val matchCode = match.code.trim()
                 text = "${match.name}\n後6碼 ${matchCode.takeLast(6)}"
                 textSize = 12f
                 setTextColor(Color.WHITE)
@@ -2464,8 +2464,13 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private fun onScanned(code: String, selectedName: String? = null) {
         stopScan()
         stopDelRepeat()
-        // 鍵盤輸出依「全碼」開關決定；列印資料則永遠保存完整條碼，交由列印頁面獨立選擇。
-        val fullCode = code.filter { it.isDigit() }
+        // 候選商品的變碼後綴（例如 -1／-x）是商品資料的一部分，不能在輸出前刪掉。
+        // 一般相機掃描仍只接受數字條碼；列印資料則保存候選商品的完整原始碼。
+        val fullCode = if (selectedName != null || code.contains('-')) {
+            code.trim().filter { it.isDigit() || it == '-' || it.isLetter() }
+        } else {
+            code.filter { it.isDigit() }
+        }
         var text = if (fullCodeEnabled) fullCode else fullCode.takeLast(6)
         val product = ProductDb.lookupProduct(this, code, selectedName)
         val productName = selectedName ?: product?.name
