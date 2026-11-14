@@ -1907,10 +1907,11 @@ class ImeService : InputMethodService(), LifecycleOwner {
         productCandScroll.visibility = if (showProductCand) View.VISIBLE else View.GONE
         clipChip.visibility = if (showChip) View.VISIBLE else View.GONE
         toolbar.visibility = if (!showCand && !showProductCand && !showChip) View.VISIBLE else View.GONE
-        midFrame.layoutParams = (midFrame.layoutParams ?: LinearLayout.LayoutParams(0, dp(46), 1f)).apply {
-            height = if (showProductCand) dp(118) else dp(46)
-            weight = if (showProductCand) 0f else 1f
-        }
+        val frameParams = (midFrame.layoutParams as? LinearLayout.LayoutParams)
+            ?: LinearLayout.LayoutParams(0, dp(46), 1f)
+        frameParams.height = if (showProductCand) dp(118) else dp(46)
+        frameParams.weight = if (showProductCand) 0f else 1f
+        midFrame.layoutParams = frameParams
         midFrame.requestLayout()
         if (showChip) clipChipText.text = clipSuggest!!.replace('\n', ' ')
     }
