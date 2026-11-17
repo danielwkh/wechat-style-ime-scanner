@@ -270,6 +270,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
             onAnyTouch = { stopDelRepeat() }
         }
         val top = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(Color.parseColor("#202124"))
         }
@@ -452,18 +453,24 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
         midFrame.addView(toolbar, FrameLayout.LayoutParams(-1, -1))
         midFrame.addView(candScroll, FrameLayout.LayoutParams(-1, -1))
-        midFrame.addView(productCandScroll, FrameLayout.LayoutParams(-1, -1))
         midFrame.addView(clipChip, FrameLayout.LayoutParams(-1, -1))
-        top.addView(midFrame, LinearLayout.LayoutParams(0, dp(46), 1f))
+        val topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.parseColor("#202124"))
+        }
+        topRow.addView(midFrame, LinearLayout.LayoutParams(0, dp(46), 1f))
 
         outBtn = cell(if (outName) "輸出名" else "輸出碼", 13f, "#FFF3C4") {
             outName = !outName
             prefs.edit().putBoolean("outName", outName).apply()
             outBtn.text = if (outName) "輸出名" else "輸出碼"
         }
-        top.addView(outBtn, LinearLayout.LayoutParams(dp(58), dp(38)).apply { setMargins(dp(4), 0, 0, 0) })
+        topRow.addView(outBtn, LinearLayout.LayoutParams(dp(58), dp(38)).apply { setMargins(dp(4), 0, 0, 0) })
         scanBtn = cell("掃描", 15f, "#07C160", Color.WHITE) { toggleScan() }
-        top.addView(scanBtn, LinearLayout.LayoutParams(dp(64), dp(38)).apply { setMargins(dp(4), 0, dp(6), 0) })
+        topRow.addView(scanBtn, LinearLayout.LayoutParams(dp(64), dp(38)).apply { setMargins(dp(4), 0, dp(6), 0) })
+        top.addView(productCandScroll, LinearLayout.LayoutParams(-1, 0))
+        top.addView(topRow, LinearLayout.LayoutParams(-1, dp(46)))
 
         keyArea = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1907,10 +1914,15 @@ class ImeService : InputMethodService(), LifecycleOwner {
         productCandScroll.visibility = if (showProductCand) View.VISIBLE else View.GONE
         clipChip.visibility = if (showChip) View.VISIBLE else View.GONE
         toolbar.visibility = if (!showCand && !showProductCand && !showChip) View.VISIBLE else View.GONE
+        val productParams = (productCandScroll.layoutParams as? LinearLayout.LayoutParams)
+            ?: LinearLayout.LayoutParams(-1, 0)
+        productParams.height = if (showProductCand) dp(118) else 0
+        productParams.weight = 0f
+        productCandScroll.layoutParams = productParams
         val frameParams = (midFrame.layoutParams as? LinearLayout.LayoutParams)
             ?: LinearLayout.LayoutParams(0, dp(46), 1f)
-        frameParams.height = if (showProductCand) dp(118) else dp(46)
-        frameParams.weight = if (showProductCand) 0f else 1f
+        frameParams.height = dp(46)
+        frameParams.weight = 1f
         midFrame.layoutParams = frameParams
         midFrame.requestLayout()
         if (showChip) clipChipText.text = clipSuggest!!.replace('\n', ' ')

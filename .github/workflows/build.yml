@@ -32,9 +32,20 @@ jobs:
         env:
           VERSION_NAME: ${{ inputs.version_name }}
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"; elif [[ -n "$VERSION_NAME" ]]; then V="$VERSION_NAME"; else V="0.0.${GITHUB_RUN_NUMBER}-dev"; fi
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            V="${GITHUB_REF_NAME#v}"
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$V"
+            VC=$((MAJOR * 1000000 + MINOR * 1000 + PATCH))
+          elif [[ -n "$VERSION_NAME" ]]; then
+            V="$VERSION_NAME"
+            VC="$GITHUB_RUN_NUMBER"
+          else
+            V="0.0.${GITHUB_RUN_NUMBER}-dev"
+            VC="$GITHUB_RUN_NUMBER"
+          fi
           echo "name=$V" >> "$GITHUB_OUTPUT"
-      - run: gradle assembleDebug --no-daemon -Pvn=${{ steps.ver.outputs.name }} -Pvc=${{ github.run_number }}
+          echo "code=$VC" >> "$GITHUB_OUTPUT"
+      - run: gradle assembleDebug --no-daemon -Pvn=${{ steps.ver.outputs.name }} -Pvc=${{ steps.ver.outputs.code }}
       - name: Rename APK
         run: cp app/build/outputs/apk/debug/app-debug.apk weime-${{ steps.ver.outputs.name }}.apk
       - name: Verify APK
