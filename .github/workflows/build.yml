@@ -45,7 +45,23 @@ jobs:
           fi
           echo "name=$V" >> "$GITHUB_OUTPUT"
           echo "code=$VC" >> "$GITHUB_OUTPUT"
-      - run: gradle assembleDebug --no-daemon -Pvn=${{ steps.ver.outputs.name }} -Pvc=${{ steps.ver.outputs.code }}
+      - name: Compile
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon \
+            -Pvn=${{ steps.ver.outputs.name }} -Pvc=${{ steps.ver.outputs.code }} 2>&1 | tee /tmp/build.log
+      # 編譯失敗時把 Kotlin/Java 的實際錯誤訊息寫進 annotation，
+      # 這樣在 Actions 頁面與 API 都看得到，不必下載完整 log。
+      - name: Report compile errors
+        if: failure()
+        run: |
+          ERR=$(grep -aE "^e: |error:" /tmp/build.log | head -25 || true)
+          if [ -z "$ERR" ]; then ERR=$(tail -40 /tmp/build.log); fi
+          while IFS= read -r line; do
+            line=${line//'%'/'%25'}; line=${line//$'\r'/}
+            line=${line//$'\n'/'%0A'}
+            echo "::error::$line"
+          done <<< "$ERR"
       - name: Rename APK
         run: cp app/build/outputs/apk/debug/app-debug.apk weime-${{ steps.ver.outputs.name }}.apk
       - name: Verify APK
