@@ -1,7 +1,7 @@
 package com.danielwkh.weime
 
-import android.app.Activity
 import android.Manifest
+import android.app.Activity
 import android.app.AlertDialog
 import android.bluetooth.BluetoothAdapter
 import android.content.Context
@@ -18,27 +18,36 @@ import android.text.TextWatcher
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
-import android.widget.Spinner
-import android.widget.ArrayAdapter
-import android.widget.AdapterView
 import android.widget.SeekBar
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import com.dothantech.printer.IDzPrinter.PrintProgress
 import com.dothantech.printer.IDzPrinter.PrinterAddress
 import com.dothantech.printer.IDzPrinter.PrinterState
+import kotlin.math.abs
 import kotlin.math.hypot
+import kotlin.math.max
 import kotlin.math.min
 
 /**
- * 第一階段列印編輯器：先完成模板、欄位及本地預覽 UI；LPAPI 連線與送印留待後續整合。
+ * 標籤編輯器（版面參考 WePrint）：
+ * 上方所見即所得的畫布 → 選取元素屬性列 → 對齊／旋轉／撤銷工具列 → 分頁式設定。
+ *
+ * 三項與舊版不同的關鍵修正：
+ * 1. 列印點陣改依機型 mm × dpi 產生（原本直接用螢幕預覽 View 的像素送去印，解析度嚴重不足）。
+ * 2. 機型選擇真正驅動畫布比例（原本 device 變數選了沒有任何作用）。
+ * 3. 繪圖、點選、列印共用同一份 LabelGeometry，點選不再因兩邊各自重算而錯位。
  */
 class PrintEditorActivity : Activity() {
     private lateinit var preview: LabelPreviewView
@@ -49,16 +58,24 @@ class PrintEditorActivity : Activity() {
     private lateinit var nonMemberPriceInput: EditText
     private lateinit var memberMode: CheckBox
     private lateinit var sizeLabel: TextView
-    private var device = PrintDevice.P1
+    private lateinit var printerButton: Button
+    private var undoButton: Button? = null
+    private var redoButton: Button? = null
+    private lateinit var elementTitle: TextView
+    private lateinit var elementTextScaleLabel: TextView
+    private lateinit var boldButton: Button
+    private lateinit var positionLabel: TextView
+
+    private var device = LabelDevice.P1
     private var nameSize = 28
     private var priceSize = 58
     private var barcodeLabelSize = 17
     private var barcodeHeight = 58
-    private var barcodeScale = 72
+    private var barcodeScale = 90
     private var barcodeFull = true
+    private var barcodeType = BarcodeRenderer.TYPE_AUTO
     private var fullBarcodeValue = ""
     private lateinit var printerManager: DtPrinterManager
-    private lateinit var printerButton: Button
     private val discoveredPrinters = LinkedHashMap<String, PrinterAddress>()
     private var printCopies = 1
     private var printDirection = 0
@@ -66,10 +83,16 @@ class PrintEditorActivity : Activity() {
     private var printDensity = -1
     private var printSpeed = -1
 
-    private enum class PrintDevice(val label: String, val widthMm: Int, val heightMm: Int) {
-        P1("P1／P1P  70 × 40 mm", 70, 40),
-        DP40("DP40  180 × 100 mm", 180, 100)
-    }
+    private val styles = LabelElement.values().associateWith { ElementStyle() }.toMutableMap()
+    private var selected = LabelElement.NAME
+
+    /** 撤銷／重做堆疊；每次操作前先記錄一份快照。 */
+    private val undoStack = ArrayDeque<Map<LabelElement, ElementStyle>>()
+    private val redoStack = ArrayDeque<Map<LabelElement, ElementStyle>>()
+
+    private lateinit var layoutPrefs: android.content.SharedPreferences
+    private lateinit var draftPrefs: android.content.SharedPreferences
+    private var page = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -105,288 +128,713 @@ class PrintEditorActivity : Activity() {
                 }
             }
         })
-        val draftPrefs = getSharedPreferences("kb", MODE_PRIVATE)
+
+        draftPrefs = getSharedPreferences("kb", MODE_PRIVATE)
+        layoutPrefs = getSharedPreferences("printLayout", MODE_PRIVATE)
+        loadDraftAndLayout()
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.rgb(245, 245, 247))
+        }
+        root.addView(buildHeader())
+
+        preview = LabelPreviewView(this)
+        root.addView(preview, LinearLayout.LayoutParams(-1, 0, 1f))
+
+        root.addView(buildElementBar())
+        root.addView(buildToolBar())
+        root.addView(buildPager())
+        root.addView(buildScrollableSettings())
+
+        setContentView(root)
+        installPreviewBinding()
+        select(LabelElement.NAME)
+        refreshUndoButtons()
+    }
+
+    // ---------------------------------------------------------------- 載入草稿
+
+    private fun loadDraftAndLayout() {
         val draftBarcode = draftPrefs.getString("printBarcode", "").orEmpty()
-        val draftFullBarcode = draftPrefs.getString("printFullBarcode", draftBarcode).orEmpty()
-        val draftName = draftPrefs.getString("printName", "").orEmpty()
-        val draftPrice = draftPrefs.getString("printPrice", "").orEmpty()
-        val draftMemberPrice = draftPrefs.getString("printMemberPrice", "").orEmpty()
-        val draftNonMemberPrice = draftPrefs.getString("printNonMemberPrice", "").orEmpty()
-        val effectivePrice = draftPrice.ifBlank { draftNonMemberPrice }
-            .ifBlank { draftPrice }
-        val layoutPrefs = getSharedPreferences("printLayout", MODE_PRIVATE)
+        fullBarcodeValue = draftPrefs.getString("printFullBarcode", draftBarcode).orEmpty()
+            .ifBlank { draftBarcode }
+        device = LabelDevice.of(layoutPrefs.getString("device", LabelDevice.P1.name))
         nameSize = layoutPrefs.getInt("nameSize", nameSize)
         priceSize = layoutPrefs.getInt("priceSize", priceSize)
         barcodeLabelSize = layoutPrefs.getInt("barcodeLabelSize", barcodeLabelSize)
         barcodeHeight = layoutPrefs.getInt("barcodeHeight", barcodeHeight)
         barcodeScale = layoutPrefs.getInt("barcodeScale", barcodeScale)
         barcodeFull = layoutPrefs.getBoolean("barcodeFull", true)
-        fullBarcodeValue = draftFullBarcode.ifBlank { draftBarcode }
-        val barcodeDisplayValue = if (barcodeFull) fullBarcodeValue else fullBarcodeValue.takeLast(6)
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(245, 245, 247))
-        }
-
-        val header = LinearLayout(this).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            setBackgroundColor(Color.WHITE)
-        }
-        header.addView(Button(this).apply {
-            text = "‹ 返回"
-            setOnClickListener { finish() }
-        }, LinearLayout.LayoutParams(dp(92), dp(44)))
-        header.addView(TextView(this).apply {
-            text = "標籤預覽與編輯"
-            textSize = 18f
-            setTextColor(Color.BLACK)
-            gravity = Gravity.CENTER
-        }, LinearLayout.LayoutParams(0, dp(44), 1f))
-        header.addView(Button(this).apply {
-            text = "列印"
-            setOnClickListener { printCurrentLabel() }
-        }, LinearLayout.LayoutParams(dp(76), dp(44)))
-        root.addView(header)
-
-        preview = LabelPreviewView(this)
-        root.addView(preview, LinearLayout.LayoutParams(-1, dp(220)).apply {
-            setMargins(dp(12), dp(12), dp(12), dp(8))
-        })
-        root.addView(TextView(this).apply {
-            text = "點選商品名、條碼或價格後拖曳；雙指只可縮放"
-            textSize = 13f
-            setTextColor(Color.DKGRAY)
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(6))
-        }, LinearLayout.LayoutParams(-1, dp(28)))
-        val canvasTools = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(8), 0, dp(8), dp(4))
-        }
-        val toolRow = LinearLayout(this).apply { gravity = Gravity.CENTER }
-        fun canvasButton(label: String, click: () -> Unit) = Button(this).apply {
-            text = label
-            textSize = 12f
-            setOnClickListener { click(); preview.invalidate() }
-        }
-        toolRow.addView(canvasButton("左對齊") { preview.alignSelected("left") }, LinearLayout.LayoutParams(0, dp(42), 1f))
-        toolRow.addView(canvasButton("水平置中") { preview.alignSelected("center") }, LinearLayout.LayoutParams(0, dp(42), 1f))
-        toolRow.addView(canvasButton("右對齊") { preview.alignSelected("right") }, LinearLayout.LayoutParams(0, dp(42), 1f))
-        canvasTools.addView(toolRow)
-        val toolRow2 = LinearLayout(this).apply { gravity = Gravity.CENTER }
-        toolRow2.addView(canvasButton("頂端") { preview.alignSelected("top") }, LinearLayout.LayoutParams(0, dp(42), 1f))
-        toolRow2.addView(canvasButton("垂直置中") { preview.alignSelected("middle") }, LinearLayout.LayoutParams(0, dp(42), 1f))
-        toolRow2.addView(canvasButton("底端") { preview.alignSelected("bottom") }, LinearLayout.LayoutParams(0, dp(42), 1f))
-        toolRow2.addView(canvasButton("反色選取") {
-            preview.toggleInvertSelected()
-        }, LinearLayout.LayoutParams(0, dp(42), 1f))
-        canvasTools.addView(toolRow2)
-        root.addView(canvasTools, LinearLayout.LayoutParams(-1, dp(88)))
-
-        val body = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), 0, dp(12), dp(20))
-        }
-        body.addView(sectionTitle("1. 選擇印表機尺寸"))
-        val deviceGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.VERTICAL
-            addView(RadioButton(this@PrintEditorActivity).apply { text = PrintDevice.P1.label; isChecked = true; tag = PrintDevice.P1 })
-            addView(RadioButton(this@PrintEditorActivity).apply { text = "P1P  70 × 40 mm（300 dpi）"; tag = PrintDevice.P1 })
-            addView(RadioButton(this@PrintEditorActivity).apply { text = PrintDevice.DP40.label; tag = PrintDevice.DP40 })
-            setOnCheckedChangeListener { group, checkedId ->
-                device = group.findViewById<RadioButton>(checkedId).tag as PrintDevice
-                sizeLabel.text = "畫布：${device.widthMm} × ${device.heightMm} mm"
-                preview.invalidate()
-            }
-        }
-        body.addView(deviceGroup)
-
-        body.addView(sectionTitle("2. 選擇模板"))
-        val template = Spinner(this)
-        template.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item,
-            listOf("單一價格", "會員價／非會員價"))
-        template.setSelection(0)
-        template.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (position == 1) memberMode.isChecked = true
-            }
-        }
-        body.addView(template, LinearLayout.LayoutParams(-1, dp(48)))
-        memberMode = CheckBox(this).apply {
-            text = "顯示會員價／非會員價區塊"
-            setOnCheckedChangeListener { _, checked ->
-                memberPriceInput.visibility = if (checked) View.VISIBLE else View.GONE
-                nonMemberPriceInput.visibility = if (checked) View.VISIBLE else View.GONE
-                preview.invalidate()
-            }
-        }
-        body.addView(memberMode)
-
-        body.addView(sectionTitle("3. 編輯內容"))
-        nameInput = field("商品名稱", draftName)
-        barcodeInput = field("條碼", barcodeDisplayValue)
-        barcodeInput.inputType = android.text.InputType.TYPE_CLASS_NUMBER
-        val barcodeMode = RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            addView(RadioButton(this@PrintEditorActivity).apply {
-                id = View.generateViewId()
-                text = "列印全碼"
-                tag = true
-            })
-            addView(RadioButton(this@PrintEditorActivity).apply {
-                id = View.generateViewId()
-                text = "只列印後六碼"
-                tag = false
-            })
-            setOnCheckedChangeListener { group, checkedId ->
-                barcodeFull = group.findViewById<RadioButton>(checkedId).tag as Boolean
-                layoutPrefs.edit().putBoolean("barcodeFull", barcodeFull).apply()
-                val value = if (barcodeFull) fullBarcodeValue else fullBarcodeValue.takeLast(6)
-                barcodeInput.setText(value)
-                barcodeInput.setSelection(value.length)
-                preview.invalidate()
-            }
-        }
-        (barcodeMode.getChildAt(if (barcodeFull) 0 else 1) as RadioButton).isChecked = true
-        priceInput = field("價格／非會員價", effectivePrice)
-        memberPriceInput = field("會員價", draftMemberPrice)
-        nonMemberPriceInput = field("非會員價", draftNonMemberPrice.ifBlank { effectivePrice })
-        val hasMemberPrices = draftMemberPrice.isNotBlank() || draftNonMemberPrice.isNotBlank()
-        memberMode.isChecked = hasMemberPrices
-        template.setSelection(if (hasMemberPrices) 1 else 0)
-        memberPriceInput.visibility = if (hasMemberPrices) View.VISIBLE else View.GONE
-        nonMemberPriceInput.visibility = if (hasMemberPrices) View.VISIBLE else View.GONE
-        body.addView(nameInput)
-        body.addView(barcodeInput)
-        body.addView(barcodeMode)
-        body.addView(priceInput)
-        body.addView(memberPriceInput)
-        body.addView(nonMemberPriceInput)
-
-        body.addView(sectionTitle("4. 調整版面元素大小"))
-        body.addView(sizeControl("商品名字體", 12, 40, nameSize) { nameSize = it; saveLayout(); preview.invalidate() })
-        body.addView(sizeControl("價格字體", 20, 86, priceSize) { priceSize = it; saveLayout(); preview.invalidate() })
-        body.addView(sizeControl("條碼數字字體", 10, 30, barcodeLabelSize) { barcodeLabelSize = it; saveLayout(); preview.invalidate() })
-        body.addView(sizeControl("條碼高度", 25, 90, barcodeHeight) { barcodeHeight = it; saveLayout(); preview.invalidate() })
-        body.addView(sizeControl("條碼寬度", 40, 100, barcodeScale) { barcodeScale = it; saveLayout(); preview.invalidate() })
-
-        body.addView(sectionTitle("5. 列印參數"))
-        val copiesInput = field("列印份數", printCopies.toString()).apply {
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            setOnFocusChangeListener { _, hasFocus ->
-                if (!hasFocus) printCopies = text.toString().toIntOrNull()?.coerceIn(1, 999) ?: 1
-            }
-        }
-        body.addView(copiesInput)
-        val gapInput = field("間隔長度（mm）", printGapLength.toString()).apply {
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            setOnFocusChangeListener { _, hasFocus ->
-                if (!hasFocus) printGapLength = text.toString().toIntOrNull()?.coerceIn(0, 50) ?: 3
-            }
-        }
-        body.addView(gapInput)
-        val direction = Spinner(this).apply {
-            adapter = ArrayAdapter(this@PrintEditorActivity, android.R.layout.simple_spinner_dropdown_item,
-                listOf("出紙方向：0°", "出紙方向：90°", "出紙方向：180°", "出紙方向：270°"))
-            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
-                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                    printDirection = position * 90
-                }
-            }
-        }
-        body.addView(direction, LinearLayout.LayoutParams(-1, dp(48)))
-        body.addView(sizeControl("列印濃度", 0, 20, if (printDensity < 0) 0 else printDensity) {
-            printDensity = if (it == 0) -1 else it
-        })
-        body.addView(sizeControl("列印速度", 0, 5, if (printSpeed < 0) 0 else printSpeed) {
-            printSpeed = if (it == 0) -1 else it
-        })
-
-        val actionRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
-        sizeLabel = TextView(this).apply { text = "畫布：70 × 40 mm"; textSize = 14f; setTextColor(Color.DKGRAY) }
-        actionRow.addView(sizeLabel, LinearLayout.LayoutParams(0, dp(48), 1f))
-        actionRow.addView(Button(this).apply {
-            text = "更新預覽"
-            setOnClickListener { preview.invalidate() }
-        }, LinearLayout.LayoutParams(dp(120), dp(48)))
-        body.addView(actionRow)
-        printerButton = Button(this).apply {
-            text = "選擇印表機"
-            setOnClickListener { discoverPrinters() }
-        }
-        body.addView(printerButton)
-
-        root.addView(ScrollView(this).apply { addView(body) }, LinearLayout.LayoutParams(-1, 0, 1f))
-        setContentView(root)
-        installPreviewBinding()
-    }
-
-    private fun installPreviewBinding() {
-        val watcher = object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { preview.invalidate() }
-            override fun afterTextChanged(s: Editable?) = Unit
-        }
-        barcodeInput.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                if (barcodeFull) fullBarcodeValue = s?.toString().orEmpty()
-            }
-            override fun afterTextChanged(s: Editable?) = Unit
-        })
-        listOf(nameInput, barcodeInput, priceInput, memberPriceInput, nonMemberPriceInput).forEach { it.addTextChangedListener(watcher) }
-        preview.read = {
-            LabelPreviewView.LabelData(
-                nameInput.text.toString(), barcodeInput.text.toString(), priceInput.text.toString(),
-                memberPriceInput.text.toString(), nonMemberPriceInput.text.toString(), memberMode.isChecked,
-                nameSize, priceSize, barcodeLabelSize, barcodeHeight, barcodeScale
+        barcodeType = layoutPrefs.getString("barcodeType", BarcodeRenderer.TYPE_AUTO).orEmpty()
+        if (barcodeType !in BarcodeRenderer.types.map { it.first }) barcodeType = BarcodeRenderer.TYPE_AUTO
+        printCopies = layoutPrefs.getInt("copies", 1)
+        printDirection = layoutPrefs.getInt("direction", 0)
+        printGapLength = layoutPrefs.getInt("gap", 3)
+        printDensity = layoutPrefs.getInt("density", -1)
+        printSpeed = layoutPrefs.getInt("speed", -1)
+        for (e in LabelElement.values()) {
+            val p = layoutPrefs
+            styles[e] = ElementStyle(
+                dxMm = p.getFloat("${e.name}_dx", 0f),
+                dyMm = p.getFloat("${e.name}_dy", 0f),
+                scale = p.getFloat("${e.name}_scale", 1f),
+                rotation = p.getInt("${e.name}_rot", 0),
+                invert = p.getBoolean("${e.name}_inv", false),
+                textScale = p.getFloat("${e.name}_text", 1f),
+                bold = p.getBoolean("${e.name}_bold", false),
             )
         }
     }
 
-    private fun field(hint: String, value: String): EditText = EditText(this).apply {
-        setHint(hint)
-        setText(value)
-        textSize = 16f
-        setSingleLine(true)
-        setPadding(dp(12), 0, dp(12), 0)
-        background = android.graphics.drawable.GradientDrawable().apply {
-            setColor(Color.WHITE); cornerRadius = dp(6).toFloat(); setStroke(dp(1), Color.LTGRAY)
+    private fun saveAll() {
+        layoutPrefs.edit()
+            .putString("device", device.name)
+            .putInt("nameSize", nameSize)
+            .putInt("priceSize", priceSize)
+            .putInt("barcodeLabelSize", barcodeLabelSize)
+            .putInt("barcodeHeight", barcodeHeight)
+            .putInt("barcodeScale", barcodeScale)
+            .putBoolean("barcodeFull", barcodeFull)
+            .putString("barcodeType", barcodeType)
+            .putInt("copies", printCopies)
+            .putInt("direction", printDirection)
+            .putInt("gap", printGapLength)
+            .putInt("density", printDensity)
+            .putInt("speed", printSpeed)
+            .apply()
+        val e = layoutPrefs.edit()
+        for ((k, s) in styles) {
+            e.putFloat("${k.name}_dx", s.dxMm)
+            e.putFloat("${k.name}_dy", s.dyMm)
+            e.putFloat("${k.name}_scale", s.scale)
+            e.putInt("${k.name}_rot", s.rotation)
+            e.putBoolean("${k.name}_inv", s.invert)
+            e.putFloat("${k.name}_text", s.textScale)
+            e.putBoolean("${k.name}_bold", s.bold)
         }
-        layoutParams = LinearLayout.LayoutParams(-1, dp(48)).apply { setMargins(0, dp(4), 0, dp(4)) }
+        e.apply()
     }
 
-    private fun sectionTitle(text: String) = TextView(this).apply {
-        this.text = text; textSize = 16f; setTextColor(Color.DKGRAY); setPadding(0, dp(12), 0, dp(4))
+    // ---------------------------------------------------------------- 版面元件
+
+    private fun buildHeader(): View {
+        val header = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            setBackgroundColor(Color.WHITE)
+        }
+        header.addView(Button(this).apply {
+            text = "‹ 返回"
+            textSize = 13f
+            setOnClickListener { finish() }
+        }, LinearLayout.LayoutParams(dp(84), dp(42)))
+        header.addView(TextView(this).apply {
+            text = "標籤編輯"
+            textSize = 17f
+            setTextColor(Color.BLACK)
+            gravity = Gravity.CENTER
+        }, LinearLayout.LayoutParams(0, dp(42), 1f))
+        header.addView(Button(this).apply {
+            text = "列印"
+            textSize = 14f
+            setBackgroundColor(Color.rgb(7, 193, 96))
+            setTextColor(Color.WHITE)
+            setOnClickListener { onPrintClicked() }
+        }, LinearLayout.LayoutParams(dp(76), dp(42)))
+        return header
     }
 
-    private fun sizeControl(label: String, min: Int, max: Int, initial: Int, onChange: (Int) -> Unit): View {
-        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        val value = TextView(this).apply {
-            text = "$label：$initial"
+    /** 選取元素列：顯示目前選到什麼，並可就地調整該元素的字級與粗體。 */
+    private fun buildElementBar(): View {
+        val wrap = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+        }
+        val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        elementTitle = TextView(this).apply {
             textSize = 14f
             setTextColor(Color.DKGRAY)
         }
+        row.addView(elementTitle, LinearLayout.LayoutParams(0, dp(30), 1f))
+        positionLabel = TextView(this).apply {
+            textSize = 11f
+            setTextColor(Color.GRAY)
+            gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        }
+        row.addView(positionLabel, LinearLayout.LayoutParams(dp(110), dp(30)))
+        wrap.addView(row)
+        val row2 = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        elementTextScaleLabel = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.DKGRAY)
+            text = "字級 100%"
+        }
+        row2.addView(elementTextScaleLabel, LinearLayout.LayoutParams(dp(96), dp(38)))
         val seek = SeekBar(this).apply {
-            this.max = max - min
-            progress = initial - min
+            max = 160
+            progress = 60
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    val current = min + progress
-                    value.text = "$label：$current"
-                    onChange(current)
+                    val v = 40 + progress
+                    elementTextScaleLabel.text = "字級 $v%"
+                    if (fromUser) {
+                        pushUndo()
+                        styles.getValue(selected).textScale = v / 100f
+                        preview.invalidate()
+                        saveAll()
+                    }
                 }
-                override fun onStartTrackingTouch(bar: SeekBar?) = Unit
+
+                override fun onStartTrackingTouch(bar: SeekBar?) = pushUndo()
                 override fun onStopTrackingTouch(bar: SeekBar?) = Unit
             })
         }
-        row.addView(value, LinearLayout.LayoutParams(dp(112), dp(48)))
-        row.addView(seek, LinearLayout.LayoutParams(0, dp(48), 1f))
+        row2.addView(seek, LinearLayout.LayoutParams(0, dp(38), 1f))
+        boldButton = Button(this).apply {
+            text = "B"
+            textSize = 15f
+            setOnClickListener {
+                pushUndo()
+                val s = styles.getValue(selected)
+                s.bold = !s.bold
+                refreshElementBar()
+                preview.invalidate()
+                saveAll()
+            }
+        }
+        row2.addView(boldButton, LinearLayout.LayoutParams(dp(44), dp(38)))
+        wrap.addView(row2)
+        return wrap
+    }
+
+    private fun buildToolBar(): View {
+        val scroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setBackgroundColor(Color.WHITE)
+        }
+        val row = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6), dp(4), dp(6), dp(8))
+        }
+        fun tool(label: String, click: () -> Unit): Button = Button(this).apply {
+            text = label
+            textSize = 12f
+            setPadding(0, 0, 0, 0)
+            setOnClickListener { click() }
+            layoutParams = LinearLayout.LayoutParams(dp(58), dp(40)).apply {
+                setMargins(dp(2), 0, dp(2), 0)
+            }
+        }
+        val undo = tool("↶ 撤銷") { undo() }.also { undoButton = it }
+        val redo = tool("↷ 重做") { redo() }.also { redoButton = it }
+        row.addView(undo)
+        row.addView(redo)
+        row.addView(tool("左") { align("left") })
+        row.addView(tool("中") { align("hcenter") })
+        row.addView(tool("右") { align("right") })
+        row.addView(tool("上") { align("top") })
+        row.addView(tool("中") { align("vcenter") })
+        row.addView(tool("下") { align("bottom") })
+        row.addView(tool("旋轉") {
+            pushUndo()
+            val s = styles.getValue(selected)
+            s.rotation = (s.rotation + 90) % 360
+            refreshElementBar()
+            preview.invalidate()
+            saveAll()
+        })
+        row.addView(tool("反白") {
+            pushUndo()
+            val s = styles.getValue(selected)
+            s.invert = !s.invert
+            preview.invalidate()
+            saveAll()
+        })
+        row.addView(tool("重設") {
+            pushUndo()
+            styles.getValue(selected).reset()
+            refreshElementBar()
+            preview.invalidate()
+            saveAll()
+        })
+        scroll.addView(row)
+        return scroll
+    }
+
+    /** 分頁切換；設定區一次只顯示一頁，避免舊版一路長捲動。 */
+    private fun buildPager(): View {
+        val bar = LinearLayout(this).apply {
+            setBackgroundColor(Color.WHITE)
+            setPadding(dp(4), 0, dp(4), dp(4))
+        }
+        val labels = listOf("內容", "條碼", "尺寸", "列印")
+        for ((i, label) in labels.withIndex()) {
+            bar.addView(Button(this).apply {
+                text = label
+                textSize = 13f
+                setOnClickListener {
+                    page = i
+                    refreshPager()
+                }
+            }, LinearLayout.LayoutParams(0, dp(38), 1f).apply {
+                setMargins(dp(2), 0, dp(2), 0)
+            })
+        }
+        pagerBar = bar
+        return bar
+    }
+
+    private lateinit var pagerBar: LinearLayout
+    private lateinit var pageContent: LinearLayout
+
+    private fun buildScrollableSettings(): View {
+        pageContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(8), dp(12), dp(20))
+        }
+        val scroll = ScrollView(this).apply {
+            addView(pageContent)
+        }
+        settingsScroll = scroll
+        return scroll.apply { layoutParams = LinearLayout.LayoutParams(-1, dp(232)) }
+    }
+
+    private lateinit var settingsScroll: ScrollView
+    private val pageViews = HashMap<Int, View>()
+
+    private fun refreshPager() {
+        for (i in 0 until pagerBar.childCount) {
+            val b = pagerBar.getChildAt(i) as? Button ?: continue
+            b.setBackgroundColor(if (i == page) Color.rgb(7, 193, 96) else Color.rgb(232, 232, 235))
+            b.setTextColor(if (i == page) Color.WHITE else Color.DKGRAY)
+        }
+        pageContentView()
+    }
+
+    private fun pageContentView() {
+        val cached = pageViews[page]
+        pageContent.removeAllViews()
+        if (cached != null) {
+            (cached.parent as? LinearLayout)?.removeView(cached)
+            pageContent.addView(cached)
+            return
+        }
+        val view = when (page) {
+            0 -> buildContentPage()
+            1 -> buildBarcodePage()
+            2 -> buildSizePage()
+            else -> buildPrintPage()
+        }
+        pageViews[page] = view
+        pageContent.addView(view)
+    }
+
+    // ---------------------------------------------------------------- 各分頁
+
+    private fun buildContentPage(): View {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        // 模板說明：對齊截圖 2 款（無會員價／會員價版）× 2 尺寸（中 70×40／大 180×100）
+        col.addView(TextView(this).apply {
+            text = "掃描或選擇商品後，品名、條碼、價格與會員價會自動帶入，並依是否有會員價自動選擇模板（無會員價＝右側單一大價；會員價版＝右側上下兩排 Member/Price）。"
+            textSize = 12f; setTextColor(Color.GRAY); setPadding(0, 0, 0, dp(6))
+        })
+        col.addView(sectionTitle("標籤尺寸"))
+        val deviceGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
+        for (d in LabelDevice.values()) {
+            val label = when (d) {
+                LabelDevice.P1 -> "中標籤 70 × 40 mm（P1／203 dpi）"
+                LabelDevice.P1P -> "中標籤 70 × 40 mm（P1P／300 dpi，更清晰）"
+                LabelDevice.DP40 -> "大標籤 180 × 100 mm（DP40／203 dpi）"
+            }
+            deviceGroup.addView(RadioButton(this).apply {
+                text = label
+                tag = d
+                isChecked = d == device
+            })
+        }
+        deviceGroup.setOnCheckedChangeListener { group, checkedId ->
+            val picked = group.findViewById<RadioButton>(checkedId).tag as LabelDevice
+            if (picked != device) {
+                device = picked
+                updateSizeLabel()
+                preview.invalidate()
+                saveAll()
+                val geo = LabelGeometry(device, currentData())
+                for ((k, st) in styles) geo.clamp(st, geo.base(k))
+                preview.invalidate()
+            }
+        }
+        col.addView(deviceGroup)
+        col.addView(sectionTitle("模板"))
+        val templateSummary = TextView(this).apply {
+            textSize = 12f; setTextColor(Color.rgb(7, 120, 70)); setPadding(0, dp(2), 0, dp(4))
+        }
+        col.addView(templateSummary)
+        fun refreshTemplateSummary() {
+            val sizeName = if (device == LabelDevice.DP40) "大標籤 180×100" else "中標籤 70×40"
+            templateSummary.text = if (memberMode.isChecked) "目前：$sizeName · 會員價版（右側 Member $ / Price $，上黑下白）"
+            else "目前：$sizeName · 無會員價（右側單一巨大價格）"
+        }
+        col.addView(sectionTitle("商品內容（掃描後自動帶入）"))
+        nameInput = field("商品名稱")
+        priceInput = field("價格（無會員價時顯示在此）")
+        memberPriceInput = field("會員價（Member $）")
+        nonMemberPriceInput = field("非會員價（Price $）")
+        memberMode = CheckBox(this).apply {
+            text = "會員價版（右側兩排 Member / Price，上黑下白）"
+            setOnCheckedChangeListener { _, checked ->
+                memberPriceInput.visibility = if (checked) View.VISIBLE else View.GONE
+                nonMemberPriceInput.visibility = if (checked) View.VISIBLE else View.GONE
+                refreshTemplateSummary()
+                preview.invalidate()
+            }
+        }
+        col.addView(nameInput)
+        col.addView(priceInput)
+        col.addView(memberMode)
+        col.addView(memberPriceInput)
+        col.addView(nonMemberPriceInput)
+
+        // 從掃描保存的 prefs 自動帶入：printName / printPrice / printMemberPrice / printNonMemberPrice
+        nameInput.setText(draftPrefs.getString("printName", "").orEmpty())
+        val draftPrice = draftPrefs.getString("printPrice", "").orEmpty()
+        val draftNonMember = draftPrefs.getString("printNonMemberPrice", "").orEmpty()
+        val draftMember = draftPrefs.getString("printMemberPrice", "").orEmpty()
+        // effective 為原價／非會員價（兩者其一）
+        val effective = draftPrice.ifBlank { draftNonMember }
+        priceInput.setText(effective)
+        memberPriceInput.setText(draftMember)
+        nonMemberPriceInput.setText(draftNonMember.ifBlank { effective })
+        // 只依「會員價」是否有值決定是否切為會員價版；避免僅有非會員價就誤判為會員價版
+        val hasMember = draftMember.isNotBlank()
+        memberMode.isChecked = hasMember
+        memberPriceInput.visibility = if (hasMember) View.VISIBLE else View.GONE
+        nonMemberPriceInput.visibility = if (hasMember) View.VISIBLE else View.GONE
+        refreshTemplateSummary()
+        // 若預覽與保存的模板不一致（如剛掃描完有會員價），立即刷新一次
+        if (hasMember) preview.invalidate()
+        return col
+    }
+
+    private fun buildBarcodePage(): View {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(sectionTitle("條碼內容"))
+        barcodeInput = field("條碼")
+        barcodeInput.inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        barcodeInput.setText(if (barcodeFull) fullBarcodeValue else fullBarcodeValue.takeLast(6))
+        barcodeInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {
+                if (barcodeFull) fullBarcodeValue = s?.toString().orEmpty()
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+        col.addView(barcodeInput)
+
+        val modeGroup = RadioGroup(this).apply {
+            orientation = RadioGroup.HORIZONTAL
+            addView(RadioButton(this@PrintEditorActivity).apply {
+                id = View.generateViewId(); text = "列印全碼"; tag = true
+            })
+            addView(RadioButton(this@PrintEditorActivity).apply {
+                id = View.generateViewId(); text = "只印後六碼"; tag = false
+            })
+            setOnCheckedChangeListener { group, checkedId ->
+                barcodeFull = group.findViewById<RadioButton>(checkedId).tag as Boolean
+                val value = if (barcodeFull) fullBarcodeValue else fullBarcodeValue.takeLast(6)
+                barcodeInput.setText(value)
+                barcodeInput.setSelection(value.length)
+                saveAll()
+                preview.invalidate()
+            }
+        }
+        (modeGroup.getChildAt(if (barcodeFull) 0 else 1) as RadioButton).isChecked = true
+        col.addView(modeGroup)
+
+        col.addView(sectionTitle("條碼類型"))
+        val typeSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@PrintEditorActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                BarcodeRenderer.types.map { it.second },
+            )
+            setSelection(BarcodeRenderer.types.indexOfFirst { it.first == barcodeType }.coerceAtLeast(0))
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    barcodeType = BarcodeRenderer.types[position].first
+                    saveAll()
+                    preview.invalidate()
+                }
+            }
+        }
+        col.addView(typeSpinner, LinearLayout.LayoutParams(-1, dp(46)))
+        col.addView(TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.GRAY)
+            text = "自動判斷：8 碼 → EAN-8、12／13 碼 → EAN-13、其他 → Code 128"
+            setPadding(0, dp(4), 0, 0)
+        })
+        return col
+    }
+
+    private fun buildSizePage(): View {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(sectionTitle("字級與條碼尺寸"))
+        col.addView(sizeControl("商品名字級", 12, 40, nameSize) { nameSize = it })
+        col.addView(sizeControl("價格字級", 20, 86, priceSize) { priceSize = it })
+        col.addView(sizeControl("條碼數字字級", 10, 30, barcodeLabelSize) { barcodeLabelSize = it })
+        col.addView(sizeControl("條碼高度", 25, 90, barcodeHeight) { barcodeHeight = it })
+        col.addView(sizeControl("條碼寬度", 40, 100, barcodeScale) { barcodeScale = it })
+        return col
+    }
+
+    private fun buildPrintPage(): View {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(sectionTitle("印表機"))
+        printerButton = Button(this).apply {
+            text = "選擇印表機"
+            setOnClickListener { discoverPrinters() }
+        }
+        col.addView(printerButton)
+        sizeLabel = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.DKGRAY)
+            setPadding(0, dp(6), 0, 0)
+        }
+        col.addView(sizeLabel)
+        updateSizeLabel()
+
+        col.addView(sectionTitle("列印參數"))
+        col.addView(numberField("列印份數", printCopies) { printCopies = it.coerceIn(1, 999) })
+        col.addView(numberField("間隔長度（mm）", printGapLength) { printGapLength = it.coerceIn(0, 50) })
+        val direction = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@PrintEditorActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                listOf("出紙方向 0°", "出紙方向 90°", "出紙方向 180°", "出紙方向 270°"),
+            )
+            setSelection((printDirection / 90).coerceIn(0, 3))
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    printDirection = position * 90
+                    saveAll()
+                }
+            }
+        }
+        col.addView(direction, LinearLayout.LayoutParams(-1, dp(46)))
+        col.addView(sizeControl("列印濃度（0 = 預設）", 0, 20, if (printDensity < 0) 0 else printDensity) {
+            printDensity = if (it == 0) -1 else it
+        })
+        col.addView(sizeControl("列印速度（0 = 預設）", 0, 5, if (printSpeed < 0) 0 else printSpeed) {
+            printSpeed = if (it == 0) -1 else it
+        })
+        return col
+    }
+
+    // ---------------------------------------------------------------- 小工具
+
+    private fun updateSizeLabel() {
+        if (!::sizeLabel.isInitialized) return
+        sizeLabel.text = "標籤 ${device.widthMm.toInt()} × ${device.heightMm.toInt()} mm" +
+            "　列印點陣 ${device.bitmapWidth} × ${device.bitmapHeight} px（${device.dpi} dpi）"
+    }
+
+    private fun sectionTitle(text: String) = TextView(this).apply {
+        this.text = text
+        textSize = 14f
+        setTextColor(Color.rgb(7, 120, 70))
+        setPadding(0, dp(10), 0, dp(4))
+    }
+
+    private fun field(hint: String): android.widget.EditText = android.widget.EditText(this).apply {
+        setHint(hint)
+        textSize = 16f
+        setSingleLine(true)
+        setPadding(dp(10), 0, dp(10), 0)
+        background = android.graphics.drawable.GradientDrawable().apply {
+            setColor(Color.WHITE)
+            cornerRadius = dp(6).toFloat()
+            setStroke(dp(1), Color.LTGRAY)
+        }
+        layoutParams = LinearLayout.LayoutParams(-1, dp(46)).apply { setMargins(0, dp(3), 0, dp(3)) }
+        addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {
+                if (::preview.isInitialized) preview.invalidate()
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+    }
+
+    private fun numberField(hint: String, value: Int, onChange: (Int) -> Unit): View {
+        val input = field(hint).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(value.toString())
+            setOnFocusChangeListener { _, hasFocus ->
+                if (!hasFocus) {
+                    val parsed = text.toString().toIntOrNull() ?: value
+                    onChange(parsed)
+                    setText(parsed.toString())
+                    saveAll()
+                }
+            }
+        }
+        return input
+    }
+
+    private fun sizeControl(label: String, minV: Int, maxV: Int, initial: Int, onChange: (Int) -> Unit): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val value = TextView(this).apply {
+            text = "$label $initial"
+            textSize = 12f
+            setTextColor(Color.DKGRAY)
+        }
+        row.addView(value, LinearLayout.LayoutParams(dp(120), dp(42)))
+        val seek = SeekBar(this).apply {
+            max = maxV - minV
+            progress = (initial - minV).coerceIn(0, maxV - minV)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    val current = minV + progress
+                    value.text = "$label $current"
+                    onChange(current)
+                    if (::preview.isInitialized) preview.invalidate()
+                }
+
+                override fun onStartTrackingTouch(bar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(bar: SeekBar?) {
+                    saveAll()
+                }
+            })
+        }
+        row.addView(seek, LinearLayout.LayoutParams(0, dp(42), 1f))
         return row
     }
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    // ---------------------------------------------------------------- 預覽與互動
+
+    private fun installPreviewBinding() {
+        preview.read = { currentData() }
+        preview.styles = styles
+        preview.onSelect = { e ->
+            selected = e
+            refreshElementBar()
+        }
+        preview.canvasInfo = { device }
+        preview.onUndoSnapshot = { pushUndo() }
+        preview.onMoved = {
+            refreshElementBar()
+            saveAll()
+            refreshUndoButtons()
+        }
+        refreshPager()
+    }
+
+    private fun currentData() = LabelData().apply {
+        name = nameInput.text.toString()
+        barcode = barcodeInput.text.toString()
+        price = priceInput.text.toString()
+        member = memberPriceInput.text.toString()
+        nonMember = nonMemberPriceInput.text.toString()
+        showMember = memberMode.isChecked
+        nameSize = this@PrintEditorActivity.nameSize
+        priceSize = this@PrintEditorActivity.priceSize
+        barcodeLabelSize = this@PrintEditorActivity.barcodeLabelSize
+        barcodeHeight = this@PrintEditorActivity.barcodeHeight
+        barcodeScale = this@PrintEditorActivity.barcodeScale
+        barcodeType = this@PrintEditorActivity.barcodeType
+    }
+
+    private fun select(e: LabelElement) {
+        selected = e
+        refreshElementBar()
+        preview.selected = e
+        preview.invalidate()
+    }
+
+    private fun refreshElementBar() {
+        val st = styles.getValue(selected)
+        elementTitle.text = "選取：${selected.title}"
+        elementTextScaleLabel.text = "字級 ${(st.textScale * 100).toInt()}%"
+        boldButton.setBackgroundColor(if (st.bold) Color.rgb(7, 193, 96) else Color.rgb(232, 232, 235))
+        boldButton.setTextColor(if (st.bold) Color.WHITE else Color.DKGRAY)
+        positionLabel.text = "x %.1f  y %.1f  %d°".format(st.dxMm, st.dyMm, st.rotation)
+    }
+
+    // ---------------------------------------------------------------- 撤銷／重做
+
+    private fun snapshot(): Map<LabelElement, ElementStyle> =
+        styles.mapValues { it.value.copy() }
+
+    private fun pushUndo() {
+        undoStack.addLast(snapshot())
+        if (undoStack.size > 60) undoStack.removeFirst()
+        redoStack.clear()
+        refreshUndoButtons()
+    }
+
+    private fun restore(snap: Map<LabelElement, ElementStyle>) {
+        for ((k, v) in snap) styles[k] = v.copy()
+        preview.invalidate()
+        refreshElementBar()
+        saveAll()
+    }
+
+    private fun undo() {
+        if (undoStack.isEmpty()) return
+        redoStack.addLast(snapshot())
+        restore(undoStack.removeLast())
+        refreshUndoButtons()
+    }
+
+    private fun redo() {
+        if (redoStack.isEmpty()) return
+        undoStack.addLast(snapshot())
+        restore(redoStack.removeLast())
+        refreshUndoButtons()
+    }
+
+    private fun refreshUndoButtons() {
+        undoButton?.alpha = if (undoStack.isEmpty()) 0.4f else 1f
+        redoButton?.alpha = if (redoStack.isEmpty()) 0.4f else 1f
+    }
+
+    /** 對齊目前選取元素；位移以 mm 為單位，預覽與列印結果一致。 */
+    private fun align(mode: String) {
+        pushUndo()
+        val st = styles.getValue(selected)
+        val geo = LabelGeometry(device, currentData())
+        val base = geo.base(selected)
+        val pts = geo.corners(base, st)
+        var minX = Float.MAX_VALUE; var maxX = -Float.MAX_VALUE
+        var minY = Float.MAX_VALUE; var maxY = -Float.MAX_VALUE
+        for (p in pts) {
+            minX = min(minX, p.x); maxX = max(maxX, p.x)
+            minY = min(minY, p.y); maxY = max(maxY, p.y)
+        }
+        when (mode) {
+            "left" -> st.dxMm += -minX
+            "right" -> st.dxMm += geo.w - maxX
+            "hcenter" -> st.dxMm += (geo.w - (minX + maxX)) / 2f
+            "top" -> st.dyMm += -minY
+            "bottom" -> st.dyMm += geo.h - maxY
+            "vcenter" -> st.dyMm += (geo.h - (minY + maxY)) / 2f
+        }
+        refreshElementBar()
+        preview.invalidate()
+        saveAll()
+    }
+
+    // ---------------------------------------------------------------- 印表機
 
     private fun discoverPrinters() {
         val adapter = BluetoothAdapter.getDefaultAdapter()
@@ -422,13 +870,14 @@ class PrintEditorActivity : Activity() {
             toast("找不到印表機，請確認印表機已開機並靠近手機")
             return
         }
-        val labels = entries.map { it.shownName?.takeIf(String::isNotBlank) ?: it.macAddress.orEmpty() }.toTypedArray()
+        val labels = entries.map {
+            it.shownName?.takeIf(String::isNotBlank) ?: it.macAddress.orEmpty()
+        }.toTypedArray()
         AlertDialog.Builder(this)
             .setTitle("選擇印表機")
             .setItems(labels) { _, which ->
-                val selected = entries[which]
                 printerButton.text = "連線中…"
-                if (!printerManager.connect(selected)) {
+                if (!printerManager.connect(entries[which])) {
                     printerButton.text = "選擇印表機"
                     toast("無法提交連線要求")
                 }
@@ -437,9 +886,11 @@ class PrintEditorActivity : Activity() {
             .show()
     }
 
-    private fun printCurrentLabel() {
+    private fun onPrintClicked() {
         if (!printerManager.isConnected()) {
             toast("請先選擇並連線印表機")
+            page = 3
+            refreshPager()
             discoverPrinters()
             return
         }
@@ -452,12 +903,14 @@ class PrintEditorActivity : Activity() {
             density = printDensity,
             speed = printSpeed,
         )
-        if (!submitted) toast("列印要求未能送出")
+        if (!submitted) toast("列印要求未能送出") else toast("已送出 ${bitmap.width} × ${bitmap.height} px 標籤")
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == 410 && grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+        if (requestCode == 410 && grantResults.isNotEmpty() &&
+            grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+        ) {
             discoverPrinters()
         }
     }
@@ -468,218 +921,180 @@ class PrintEditorActivity : Activity() {
     }
 
     private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
-    private fun showNotReady(message: String) = android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show()
-    private fun saveLayout() {
-        getSharedPreferences("printLayout", MODE_PRIVATE).edit()
-            .putInt("nameSize", nameSize)
-            .putInt("priceSize", priceSize)
-            .putInt("barcodeLabelSize", barcodeLabelSize)
-            .putInt("barcodeHeight", barcodeHeight)
-            .putInt("barcodeScale", barcodeScale)
-            .apply()
-    }
-    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-    private class LabelPreviewView(context: Context) : View(context) {
-        enum class Element { NAME, BARCODE, PRICE }
-        data class LabelData(
-            val name: String,
-            val barcode: String,
-            val price: String,
-            val member: String,
-            val nonMember: String,
-            val showMember: Boolean,
-            val nameSize: Int = 28,
-            val priceSize: Int = 58,
-            val barcodeLabelSize: Int = 17,
-            val barcodeHeight: Int = 58,
-            val barcodeScale: Int = 72,
-        )
-        private data class Transform(var dx: Float = 0f, var dy: Float = 0f, var scale: Float = 1f, var invert: Boolean = false)
+    /**
+     * 畫布：依機型比例繪製白色標籤，並顯示 mm 標尺。
+     *
+     * renderBitmap() 會依「機型 mm × dpi」重新配置 Canvas，而不是沿用螢幕上 View 的像素尺寸，
+     * 因此列印點陣的條碼模組寬度與字級才是正確的。
+     */
+    private inner class LabelPreviewView(context: Context) : View(context) {
         var read: (() -> LabelData)? = null
+        var styles: MutableMap<LabelElement, ElementStyle> = mutableMapOf()
+        var selected: LabelElement = LabelElement.NAME
+        var canvasInfo: (() -> LabelDevice)? = null
+        var onSelect: ((LabelElement) -> Unit)? = null
+        var onUndoSnapshot: (() -> Unit)? = null
+        var onMoved: (() -> Unit)? = null
+
+        private val painter = LabelPainter()
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        private val transforms = Element.values().associateWith { Transform() }.toMutableMap()
-        private var selected = Element.NAME
+        private var downX = 0f
+        private var downY = 0f
         private var lastX = 0f
         private var lastY = 0f
-        private var baseDistance = 1f
+        private var baseDistance = 0f
         private var baseScale = 1f
-        private var lastCanvas = floatArrayOf(0f, 0f, 0f, 0f)
-        private var lastRects: Map<Element, FloatArray> = emptyMap()
-        private var showSelection = true
+        private var dragging = false
+        private var movedOnce = false
 
-        fun renderBitmap(): Bitmap {
-            val output = Bitmap.createBitmap(width.coerceAtLeast(1), height.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
-            val outputCanvas = Canvas(output)
-            showSelection = false
-            draw(outputCanvas)
-            showSelection = true
-            return output
-        }
+        /** mm → 螢幕 px 的縮放與標籤左上角位置。 */
+        private var pxPerMm = 1f
+        private var ox = 0f
+        private var oy = 0f
 
-        fun toggleInvertSelected() {
-            val tr = transforms.getValue(selected)
-            tr.invert = !tr.invert
-            invalidate()
-        }
-
-        fun alignSelected(mode: String) {
-            val rect = lastRects[selected] ?: return
-            val canvas = lastCanvas
-            val tr = transforms.getValue(selected)
-            val cx = (rect[0] + rect[2]) / 2f
-            val cy = (rect[1] + rect[3]) / 2f
-            when (mode) {
-                "left" -> tr.dx = canvas[0] + (rect[2] - rect[0]) / 2f - cx
-                "center" -> tr.dx = (canvas[0] + canvas[2]) / 2f - cx
-                "right" -> tr.dx = canvas[2] - (rect[2] - rect[0]) / 2f - cx
-                "top" -> tr.dy = canvas[1] + (rect[3] - rect[1]) / 2f - cy
-                "middle" -> tr.dy = (canvas[1] + canvas[3]) / 2f - cy
-                "bottom" -> tr.dy = canvas[3] - (rect[3] - rect[1]) / 2f - cy
-            }
-            invalidate()
+        private fun computeLayout() {
+            val dev = canvasInfo?.invoke() ?: LabelDevice.P1
+            val pad = dp(12).toFloat()
+            val availW = (width - pad * 2).coerceAtLeast(1f)
+            val availH = (height - pad * 2).coerceAtLeast(1f)
+            pxPerMm = min(availW / dev.widthMm, availH / dev.heightMm)
+            val w = dev.widthMm * pxPerMm
+            val h = dev.heightMm * pxPerMm
+            ox = (width - w) / 2f
+            oy = (height - h) / 2f
         }
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            val d = read?.invoke() ?: LabelData("", "", "", "", "", false)
-            canvas.drawColor(Color.rgb(232, 232, 235))
-            val pad = dp(10f)
-            val scale = min((width - pad * 2) / 7f, (height - pad * 2) / 4f)
-            val w = 7f * scale
-            val h = 4f * scale
-            val left = (width - w) / 2f
-            val top = (height - h) / 2f
-            lastCanvas = floatArrayOf(left, top, left + w, top + h)
-            paint.color = Color.WHITE; paint.style = Paint.Style.FILL
-            canvas.drawRect(left, top, left + w, top + h, paint)
-            paint.color = Color.BLACK
+            val data = read?.invoke() ?: return
+            val dev = canvasInfo?.invoke() ?: LabelDevice.P1
+            computeLayout()
+            val geo = LabelGeometry(dev, data)
+            canvas.drawColor(Color.rgb(226, 226, 230))
 
-            val nameRect = floatArrayOf(left + scale * 0.35f, top + scale * 0.18f, left + w - scale * 0.35f, top + scale * 0.82f)
-            val encoded = BarcodeRenderer.encode(d.barcode)
-            val bx = left + w * 0.08f
-            val bw = min(w * d.barcodeScale / 100f, w * 0.84f)
-            val by = top + h * 0.27f
-            val requestedBarcodeHeight = h * d.barcodeHeight / 100f
-            val barcodeLabelSizePx = scale * d.barcodeLabelSize / 40f
-            paint.textSize = barcodeLabelSizePx
-            val labelMetrics = paint.fontMetrics
-            val labelGap = scale * 0.08f
-            val labelReserve = maxOf(
-                scale * 0.58f,
-                labelGap + (labelMetrics.descent - labelMetrics.ascent) + scale * 0.12f
+            // 白色標籤底
+            paint.style = Paint.Style.FILL
+            paint.color = Color.WHITE
+            canvas.drawRect(ox, oy, ox + dev.widthMm * pxPerMm, oy + dev.heightMm * pxPerMm, paint)
+
+            painter.draw(
+                canvas, geo, styles, pxPerMm, ox, oy,
+                selected, showSelection = true,
             )
-            val bh = min(requestedBarcodeHeight, (top + h - by - labelReserve).coerceAtLeast(scale * 0.35f))
-            val barcodeLabelBaseline = by + bh + labelGap - labelMetrics.ascent
-            val barcodeRect = floatArrayOf(bx, by, bx + bw, by + bh + labelReserve)
-            val priceRect = floatArrayOf(left + w * 0.48f, top + h * 0.48f, left + w - scale * 0.15f, top + h - scale * 0.12f)
-            lastRects = mapOf(Element.NAME to nameRect, Element.BARCODE to barcodeRect, Element.PRICE to priceRect)
 
-            withTransform(canvas, Element.NAME, nameRect[0], nameRect[1], nameRect[2], nameRect[3]) {
-                paint.textAlign = Paint.Align.CENTER
-                paint.typeface = android.graphics.Typeface.DEFAULT_BOLD
-                paint.textSize = scale * d.nameSize / 40f
-                canvas.drawText(d.name.ifBlank { "商品名稱" }, (nameRect[0] + nameRect[2]) / 2f, top + scale * 0.58f, paint)
-            }
-            withTransform(canvas, Element.BARCODE, barcodeRect[0], barcodeRect[1], barcodeRect[2], barcodeRect[3]) {
-                if (encoded != null) {
+            // 邊框與 mm 標尺
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = dp(1).toFloat()
+            paint.color = Color.rgb(170, 170, 175)
+            canvas.drawRect(ox, oy, ox + dev.widthMm * pxPerMm, oy + dev.heightMm * pxPerMm, paint)
+            drawRuler(canvas, dev)
+        }
+
+        /** 每 10 mm 一道刻度與數字，方便確認實際尺寸。 */
+        private fun drawRuler(canvas: Canvas, dev: LabelDevice) {
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = dp(1).toFloat()
+            paint.color = Color.rgb(120, 120, 125)
+            paint.textSize = dp(8).toFloat()
+            paint.textAlign = Paint.Align.LEFT
+            var mm = 0
+            while (mm <= dev.widthMm.toInt()) {
+                val x = ox + mm * pxPerMm
+                val len = if (mm % 50 == 0) dp(7) else dp(4)
+                canvas.drawLine(x, oy - len, x, oy, paint)
+                if (mm % 20 == 0) {
                     paint.style = Paint.Style.FILL
-                    val module = bw / encoded.bits.length
-                    for (i in encoded.bits.indices) if (encoded.bits[i] == '1') {
-                        canvas.drawRect(bx + i * module, by, bx + (i + 1) * module, by + bh, paint)
-                    }
-                    paint.textSize = barcodeLabelSizePx
-                    paint.typeface = android.graphics.Typeface.DEFAULT
-                    canvas.drawText(encoded.display.takeLast(6), bx + bw / 2f, barcodeLabelBaseline, paint)
-                } else {
-                    paint.style = Paint.Style.STROKE; paint.color = Color.rgb(190, 45, 45)
-                    canvas.drawRect(bx, by, bx + bw, by + bh, paint)
-                    paint.style = Paint.Style.FILL; paint.textSize = scale * 0.14f
-                    paint.typeface = android.graphics.Typeface.DEFAULT
-                    canvas.drawText("條碼格式無效", bx + bw / 2f, by + bh / 2f, paint)
-                    paint.color = Color.BLACK
+                    canvas.drawText(mm.toString(), x + dp(1), oy - dp(8), paint)
+                    paint.style = Paint.Style.STROKE
                 }
+                mm += 10
             }
-            withTransform(canvas, Element.PRICE, priceRect[0], priceRect[1], priceRect[2], priceRect[3]) {
-                paint.textSize = scale * d.priceSize / 40f
-                paint.typeface = android.graphics.Typeface.DEFAULT_BOLD
-                if (d.showMember) {
-                    paint.textAlign = Paint.Align.RIGHT
-                    canvas.drawText(d.member.ifBlank { "—" }.let { if (it == "—") it else "$${it}" }, left + w - scale * 0.25f, top + h * 0.65f, paint)
-                    paint.textSize = scale * 0.28f; paint.typeface = android.graphics.Typeface.DEFAULT
-                    canvas.drawText("會員價", left + w - scale * 2.0f, top + h * 0.64f, paint)
-                    paint.textSize = scale * d.priceSize / 40f; paint.typeface = android.graphics.Typeface.DEFAULT_BOLD
-                    canvas.drawText(d.nonMember.ifBlank { "—" }.let { if (it == "—") it else "$${it}" }, left + w - scale * 0.25f, top + h * 0.88f, paint)
-                    paint.textSize = scale * 0.28f; paint.typeface = android.graphics.Typeface.DEFAULT
-                    canvas.drawText("非會員價", left + w - scale * 2.0f, top + h * 0.87f, paint)
-                } else {
-                    paint.textAlign = Paint.Align.CENTER
-                    canvas.drawText(d.price.ifBlank { "—" }.let { if (it == "—") it else "$${it}" }, left + w * 0.74f, top + h * 0.82f, paint)
+            mm = 0
+            paint.textAlign = Paint.Align.RIGHT
+            while (mm <= dev.heightMm.toInt()) {
+                val y = oy + mm * pxPerMm
+                val len = if (mm % 50 == 0) dp(7) else dp(4)
+                canvas.drawLine(ox - len, y, ox, y, paint)
+                if (mm % 20 == 0) {
+                    paint.style = Paint.Style.FILL
+                    canvas.drawText(mm.toString(), ox - dp(2), y + dp(3), paint)
+                    paint.style = Paint.Style.STROKE
                 }
+                mm += 10
             }
-            paint.style = Paint.Style.STROKE; paint.strokeWidth = 2f; paint.color = Color.LTGRAY
-            canvas.drawRect(left, top, left + w, top + h, paint)
-            if (showSelection) drawSelection(canvas, selected, nameRect, barcodeRect, priceRect)
         }
 
-        private fun withTransform(canvas: Canvas, element: Element, l: Float, t: Float, r: Float, b: Float, draw: () -> Unit) {
-            val tr = transforms.getValue(element)
-            val cx = (l + r) / 2f; val cy = (t + b) / 2f
-            canvas.save()
-            canvas.translate(tr.dx, tr.dy)
-            canvas.scale(tr.scale, tr.scale, cx, cy)
-            if (tr.invert) {
-                paint.style = Paint.Style.FILL
-                paint.color = Color.BLACK
-                canvas.drawRect(l, t, r, b, paint)
-                paint.color = Color.WHITE
-            } else {
-                paint.color = Color.BLACK
-            }
-            draw()
-            canvas.restore()
-        }
-
-        private fun drawSelection(canvas: Canvas, element: Element, name: FloatArray, barcode: FloatArray, price: FloatArray) {
-            val rect = when (element) { Element.NAME -> name; Element.BARCODE -> barcode; Element.PRICE -> price }
-            val tr = transforms.getValue(element)
-            canvas.save(); canvas.translate(tr.dx, tr.dy)
-            canvas.scale(tr.scale, tr.scale, (rect[0] + rect[2]) / 2f, (rect[1] + rect[3]) / 2f)
-            paint.style = Paint.Style.STROKE; paint.strokeWidth = dp(2f); paint.color = Color.rgb(40, 120, 230)
-            canvas.drawRect(rect[0], rect[1], rect[2], rect[3], paint)
-            canvas.restore()
+        /** 依機型 mm × dpi 產生列印點陣（不含選取框與標尺）。 */
+        fun renderBitmap(): Bitmap {
+            val data = read?.invoke() ?: LabelData()
+            val dev = canvasInfo?.invoke() ?: LabelDevice.P1
+            val geo = LabelGeometry(dev, data)
+            val out = Bitmap.createBitmap(dev.bitmapWidth, dev.bitmapHeight, Bitmap.Config.ARGB_8888)
+            val c = Canvas(out)
+            c.drawColor(Color.WHITE)
+            painter.draw(c, geo, styles, dev.pxPerMm, 0f, 0f, null as LabelElement?, showSelection = false)
+            return out
         }
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
+            val dev = canvasInfo?.invoke() ?: return true
             val data = read?.invoke() ?: return true
-            val pad = dp(10f); val s = min((width - pad * 2) / 7f, (height - pad * 2) / 4f); val w = 7f * s; val h = 4f * s
-            val l = (width - w) / 2f; val t = (height - h) / 2f
-            val barcodeTop = t + h * 0.27f
-            val barcodeLabelSizePx = s * data.barcodeLabelSize / 40f
-            val labelReserve = maxOf(s * 0.58f, barcodeLabelSizePx * 1.5f)
-            val barcodeHeight = min(h * data.barcodeHeight / 100f, (t + h - barcodeTop - labelReserve).coerceAtLeast(s * 0.35f))
-            val barcode = floatArrayOf(l + w * 0.08f, barcodeTop, l + w * 0.08f + min(w * data.barcodeScale / 100f, w * 0.84f), barcodeTop + barcodeHeight + labelReserve)
-            val hitElement = hit(event.x, event.y, l + s * 0.35f, t + s * 0.18f, l + w - s * 0.35f, t + s * 0.82f, barcode, l + w * 0.48f, t + h * 0.48f, l + w - s * 0.15f, t + h - s * 0.12f)
+            val geo = LabelGeometry(dev, data)
+            val toMm = { v: Float, origin: Float -> (v - origin) / pxPerMm }
             when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> { selected = hitElement; lastX = event.x; lastY = event.y; invalidate() }
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.x; downY = event.y
+                    lastX = event.x; lastY = event.y
+                    dragging = false; movedOnce = false
+                    baseDistance = 0f
+                    val hit = geo.hitTest(styles, toMm(event.x, ox), toMm(event.y, oy))
+                    if (hit != null && hit != selected) onSelect?.invoke(hit)
+                }
+
                 MotionEvent.ACTION_POINTER_DOWN -> if (event.pointerCount >= 2) {
-                    baseDistance = distance(event); val tr = transforms.getValue(selected); baseScale = tr.scale
+                    baseDistance = distance(event)
+                    baseScale = styles.getValue(selected).scale
+                    onUndoSnapshot?.invoke()
+                    movedOnce = true
                 }
+
                 MotionEvent.ACTION_MOVE -> {
-                    val tr = transforms.getValue(selected)
-                    if (event.pointerCount >= 2 && baseDistance > 0f) { tr.scale = (baseScale * distance(event) / baseDistance).coerceIn(0.4f, 3f) }
-                    else { tr.dx += event.x - lastX; tr.dy += event.y - lastY }
-                    lastX = event.x; lastY = event.y; invalidate()
+                    val st = styles.getValue(selected)
+                    if (event.pointerCount >= 2 && baseDistance > 0f) {
+                        st.scale = (baseScale * distance(event) / baseDistance).coerceIn(0.3f, 3.5f)
+                        geo.clamp(st, geo.base(selected))
+                        movedOnce = true
+                        invalidate()
+                    } else {
+                        val dx = (event.x - lastX) / pxPerMm
+                        val dy = (event.y - lastY) / pxPerMm
+                        if (!dragging && hypot(event.x - downX, event.y - downY) > dp(4)) {
+                            dragging = true
+                            onUndoSnapshot?.invoke()
+                        }
+                        if (dragging && (abs(dx) > 0f || abs(dy) > 0f)) {
+                            st.dxMm += dx
+                            st.dyMm += dy
+                            // 拖曳時限制在標籤內，避免印出來被裁掉
+                            geo.clamp(st, geo.base(selected))
+                            lastX = event.x; lastY = event.y
+                            movedOnce = true
+                            invalidate()
+                        }
+                        lastX = event.x; lastY = event.y
+                    }
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { baseDistance = 0f; invalidate() }
+
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    baseDistance = 0f
+                    if (movedOnce) onMoved?.invoke()
+                    dragging = false
+                }
             }
             return true
         }
 
-        private fun hit(x: Float, y: Float, nl: Float, nt: Float, nr: Float, nb: Float, b: FloatArray, pl: Float, pt: Float, pr: Float, pb: Float): Element {
-            return when { x in b[0]..b[2] && y in b[1]..b[3] -> Element.BARCODE; x in pl..pr && y in pt..pb -> Element.PRICE; x in nl..nr && y in nt..nb -> Element.NAME; else -> selected }
-        }
         private fun distance(e: MotionEvent) = hypot(e.getX(0) - e.getX(1), e.getY(0) - e.getY(1))
-        private fun dp(v: Float) = v * resources.displayMetrics.density
     }
 }
