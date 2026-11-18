@@ -259,6 +259,13 @@ class ImeService : InputMethodService(), LifecycleOwner {
                 .thenBy { it.index }
         ).map { it.value }
 
+    private fun relatedWordsFor(word: String, existing: List<Pair<String, Int>>): List<Pair<String, Int>> {
+        val merged = LinkedHashMap<String, Pair<String, Int>>()
+        for (item in existing) if (item.first != word) merged[item.first] = item
+        for (item in Dict.related(word)) if (!merged.containsKey(item.first)) merged[item.first] = item
+        return sortByUserFrequency(merged.values.toList()).take(40)
+    }
+
     override fun onCreate() {
         super.onCreate()
         registry.currentState = Lifecycle.State.CREATED
@@ -1617,7 +1624,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
     private fun pick(c: Pair<String, Int>) {
         recordWord(c.first)
-        if (comp.length <= c.second) relatedCands = cands.filter { it.first != c.first }
+        if (comp.length <= c.second) relatedCands = relatedWordsFor(c.first, cands)
         ic?.commitText(conv(c.first), 1)
         comp.delete(0, minOf(c.second, comp.length))
         refresh()
@@ -1632,10 +1639,10 @@ class ImeService : InputMethodService(), LifecycleOwner {
             else {
                 val completed = compDisplay()
                 recordWord(completed)
+                relatedCands = relatedWordsFor(completed, emptyList())
                 ic?.commitText(completed, 1)
                 comp.clear()
-                cands = emptyList()
-                relatedCands = emptyList()
+                cands = relatedCands
                 showCands()
             }
         }
@@ -1660,9 +1667,9 @@ class ImeService : InputMethodService(), LifecycleOwner {
         if (comp.isNotEmpty()) {
             val completed = compDisplay()
             recordWord(completed)
-            relatedCands = cands.filter { it.first != completed }
+            relatedCands = relatedWordsFor(completed, cands)
             ic?.commitText(completed, 1)
-            comp.clear(); cands = emptyList(); showCands()
+            comp.clear(); cands = relatedCands; showCands()
             return
         }
         val ei = currentInputEditorInfo

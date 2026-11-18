@@ -36,6 +36,22 @@ object Dict {
         return (common + rare).take(40)
     }
 
+    /** 依已完成詞的最後一個中文字找下一步可選的詞語。 */
+    fun related(word: String): List<Pair<String, Int>> {
+        val anchor = word.lastOrNull { it in '\u3400'..'\u9fff' } ?: return emptyList()
+        val terms = map.values.asSequence().flatten()
+            .filter { it.length > 1 && it != word && it.contains(anchor) }
+            .distinct()
+            .sortedWith(
+                compareByDescending<String> { it.startsWith(anchor.toString()) }
+                    .thenByDescending { CjEngine.freqOf(it) }
+                    .thenBy { it.length }
+            )
+            .take(30)
+            .toList()
+        return terms.map { it to 0 }
+    }
+
     private const val RAW = """
 nihao 你好
 women 我們
