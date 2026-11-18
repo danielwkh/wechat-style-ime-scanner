@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.9.20 — 2026-11-18
+
+### 修正列印編輯器閃退
+
+- 修正按「列印」開啟後約 1 秒自動閃退的問題：LPAPI 在 `printerButton` 尚未初始化（尚未切到「列印」分頁）時回調 `onPrinterState`，直接存取會拋 `UninitializedPropertyAccessException`。
+- 所有 `printerButton` / `printerManager` 存取改為 `::isInitialized` 檢查與 `try/catch`，`onDraw` 與 `discover` 流程亦加入容錯，避免單次繪製或搜尋異常導致 Activity 崩潰。
+- 延遲顯示印表機列表改為可取消的 `mainHandler` + `pendingShow`，`onDestroy` 時移除回調，防止視窗洩漏。
+- `DtPrinterManager` 全部 API 呼叫包裹容錯，杜絕底層 SDK 拋錯導致閃退。
+
 ## v2.9.19 — 2026-11-18
 
 ### 列印編輯器重做（對齊截圖 2 款模板 × 2 尺寸，參考 WePrint）

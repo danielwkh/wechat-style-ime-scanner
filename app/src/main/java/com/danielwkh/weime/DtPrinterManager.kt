@@ -42,21 +42,23 @@ class DtPrinterManager(
     })
 
     fun discover() {
-        api.discovery()
+        try { api.discovery() } catch (_: Exception) {}
     }
 
     fun stopDiscovery() {
-        api.stopDiscovery()
+        try { api.stopDiscovery() } catch (_: Exception) {}
     }
 
-    fun connect(address: PrinterAddress): Boolean = api.openPrinterByAddress(address)
+    fun connect(address: PrinterAddress): Boolean = try { api.openPrinterByAddress(address) } catch (_: Exception) { false }
 
     fun isConnected(): Boolean {
-        val state = api.printerState
-        return state != null && state != PrinterState.Disconnected && state != PrinterState.Connecting
+        return try {
+            val state = api.printerState
+            state != null && state != PrinterState.Disconnected && state != PrinterState.Connecting
+        } catch (_: Exception) { false }
     }
 
-    fun printerName(): String = api.printerName.orEmpty()
+    fun printerName(): String = try { api.printerName.orEmpty() } catch (_: Exception) { "" }
 
     fun print(bitmap: Bitmap, copies: Int, direction: Int, gapLength: Int, density: Int, speed: Int): Boolean {
         if (!isConnected()) return false
@@ -67,11 +69,11 @@ class DtPrinterManager(
             if (density >= 0) putInt(IDzPrinter.PrintParamName.PRINT_DENSITY, density)
             if (speed >= 0) putInt(IDzPrinter.PrintParamName.PRINT_SPEED, speed)
         }
-        return api.printBitmap(bitmap, params)
+        return try { api.printBitmap(bitmap, params) } catch (_: Exception) { false }
     }
 
     fun close() {
-        api.stopDiscovery()
-        api.quit()
+        try { api.stopDiscovery() } catch (_: Exception) {}
+        try { api.quit() } catch (_: Exception) {}
     }
 }
