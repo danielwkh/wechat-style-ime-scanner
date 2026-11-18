@@ -36,20 +36,29 @@ object Dict {
         return (common + rare).take(40)
     }
 
-    /** 依已完成詞的最後一個中文字找下一步可選的詞語。 */
+    /** 手寫詞庫的多字詞，依首字建索引（只建一次，查詢不必每次掃全部詞條）。 */
+    private val multiByFirst: Map<Char, List<String>> by lazy {
+        val m = LinkedHashMap<Char, MutableList<String>>()
+        for (w in map.values.asSequence().flatten()) {
+            if (w.length <= 1) continue
+            m.getOrPut(w[0]) { mutableListOf() }.add(w)
+        }
+        m.mapValues { (_, v) -> v.distinct().sortedByDescending { CjEngine.freqOf(it) } }
+    }
+
+    /** 依已完成詞的最後一個中文字找下一步可選的詞語（手寫詞庫部分）。 */
     fun related(word: String): List<Pair<String, Int>> {
         val anchor = word.lastOrNull { it in '\u3400'..'\u9fff' } ?: return emptyList()
-        val terms = map.values.asSequence().flatten()
-            .filter { it.length > 1 && it != word && it.contains(anchor) }
-            .distinct()
-            .sortedWith(
-                compareByDescending<String> { it.startsWith(anchor.toString()) }
-                    .thenByDescending { CjEngine.freqOf(it) }
-                    .thenBy { it.length }
-            )
-            .take(30)
-            .toList()
-        return terms.map { it to 0 }
+        val out = LinkedHashSet<String>()
+        multiByFirst[anchor]?.forEach { if (it != word) out.add(it) }
+        if (out.isEmpty()) {
+            // 尾字沒有可接續的詞，才用「包含這個字」的詞墊檔
+            outer@ for ((_, v) in multiByFirst) for (w in v) {
+                if (w != word && anchor in w) out.add(w)
+                if (out.size >= 30) break@outer
+            }
+        }
+        return out.take(30).map { it to 0 }
     }
 
     private const val RAW = """

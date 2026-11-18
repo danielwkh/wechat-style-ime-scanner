@@ -57,6 +57,16 @@ jobs:
           "$BT/apksigner" verify --verbose --print-certs "$APK"
           "$BT/zipalign" -c 4 "$APK" && echo "zipalign OK"
           "$BT/aapt2" dump badging "$APK" | head -8
+      - name: Verify related-word assets
+        run: |
+          APK=weime-${{ steps.ver.outputs.name }}.apk
+          # 關聯詞表若沒打包，功能會靜默退回 37 個手寫詞，所以這裡直接擋下來
+          unzip -l "$APK" | grep -E "assets/related\.tsv" || {
+            echo "ERROR: assets/related.tsv missing from APK"; exit 1; }
+          N=$(unzip -p "$APK" assets/related.tsv | wc -l)
+          echo "related.tsv anchors: $N"
+          test "$N" -gt 1000 || { echo "ERROR: related.tsv too small ($N anchors)"; exit 1; }
+          unzip -l "$APK" | grep -E "assets/(cangjie5\.base\.dict\.yaml|freq\.tsv|stroke\.tsv)"
       - uses: actions/upload-artifact@v4
         with:
           name: weime-apk

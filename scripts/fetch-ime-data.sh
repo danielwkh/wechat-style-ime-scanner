@@ -3,6 +3,7 @@
 #   cangjie5.base.dict.yaml  Rime 倉頡五代單字碼表（rime/rime-cangjie，LGPL）
 #   freq.tsv                 由 rime-essay 的 essay.txt 取出的單字字頻（用來排候選字）
 #   stroke.tsv               由 rime/rime-stroke 的 stroke.dict.yaml 整理出的單字筆劃碼（h橫 s豎 p撇 n點 z折）
+#   related.tsv              關聯詞表：jieba 詞典（MIT）轉繁，依 rime-essay 詞頻排序；每行「錨字 詞 詞 …」
 set -euo pipefail
 DEST="$(cd "$(dirname "$0")/.." && pwd)/app/src/main/assets"
 mkdir -p "$DEST"
@@ -91,6 +92,81 @@ print("stroke entries:", len(out))
 PY
 else
   echo "WARNING: stroke.dict.yaml download failed, stroke input disabled"
+fi
+# 關聯詞表：related.tsv 已隨版控提供（app/src/main/assets/related.tsv）。
+# 只有在檔案不存在時才重新產生；產生失敗也不讓編譯失敗，程式會退回 Dict.kt 的手寫詞庫。
+if [ ! -s "$DEST/related.tsv" ]; then
+  echo "related.tsv not found, generating from jieba + rime-essay"
+  if ! python3 -c "import opencc" 2>/dev/null; then
+    python3 -m pip install --quiet --disable-pip-version-check opencc-python-reimplemented 2>/dev/null || true
+  fi
+  if ! curl -fL --retry 2 -o "$TMP/jieba_dict.txt" \
+    "https://github.com/fxsjy/jieba/raw/refs/heads/master/jieba/dict.txt"; then
+    echo "WARNING: jieba dict download failed, related words fall back to Dict.kt"
+    : > "$DEST/related.tsv"
+  elif [ ! -s "$TMP/essay.txt" ]; then
+    echo "WARNING: no essay.txt, related word table skipped"
+    : > "$DEST/related.tsv"
+  else
+    python3 - "$TMP/essay.txt" "$TMP/jieba_dict.txt" "$DEST/related.tsv" <<'PYGEN'
+import sys
+from collections import defaultdict
+
+def cjk(ch):
+    cp = ord(ch)
+    return 0x3400 <= cp <= 0x9fff
+
+essay, jieba, dst = sys.argv[1], sys.argv[2], sys.argv[3]
+MIN_F, PER = 800, 24   # 詞頻門檻、每個錨字保留幾個詞
+
+try:
+    import opencc
+    s2t = opencc.OpenCC("s2t")
+    t2tw = opencc.OpenCC("t2tw")
+except Exception:
+    print("WARNING: opencc unavailable, related word table skipped")
+    open(dst, "w").close()
+    raise SystemExit(0)
+
+# 詞頻：essay 用異體字（爲／裏／着），先正規化成台灣標準體（為／裡／著）
+freq = {}
+with open(essay, encoding="utf-8") as f:
+    for line in f:
+        p = line.rstrip("\n").split("\t")
+        if len(p) == 2 and p[1].isdigit():
+            w = t2tw.convert(p[0])
+            freq[w] = max(freq.get(w, 0), int(p[1]))
+
+best = {}
+with open(jieba, encoding="utf-8") as f:
+    for line in f:
+        p = line.split()
+        if len(p) < 2:
+            continue
+        w = p[0]
+        # 只收 2–3 字純漢字詞，避免「你一、我個」這種跨界假詞
+        if not (2 <= len(w) <= 3) or not all(cjk(c) for c in w):
+            continue
+        t = t2tw.convert(s2t.convert(w))
+        if len(t) != len(w) or not all(cjk(c) for c in t):
+            continue
+        fv = freq.get(t, 0)
+        if fv >= MIN_F and fv > best.get(t, -1):
+            best[t] = fv
+
+by_first = defaultdict(list)
+for w, fv in best.items():
+    by_first[w[0]].append((fv, w))
+
+lines = []
+for ch in sorted(by_first):
+    lst = sorted(by_first[ch], key=lambda x: (-x[0], x[1]))[:PER]
+    lines.append(ch + " " + " ".join(w for _, w in lst))
+with open(dst, "w", encoding="utf-8") as o:
+    o.write("\n".join(lines) + "\n")
+print("related.tsv:", len(by_first), "anchors,", sum(len(v) for v in by_first.values()), "words")
+PYGEN
+  fi
 fi
 rm -rf "$TMP"
 ls -l "$DEST"
