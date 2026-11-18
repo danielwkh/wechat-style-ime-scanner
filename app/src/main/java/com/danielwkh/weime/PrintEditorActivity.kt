@@ -82,6 +82,8 @@ class PrintEditorActivity : Activity() {
     private var printGapLength = 3
     private var printDensity = -1
     private var printSpeed = -1
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var pendingShow: Runnable? = null
 
     private val styles = LabelElement.values().associateWith { ElementStyle() }.toMutableMap()
     private var selected = LabelElement.NAME
@@ -107,14 +109,19 @@ class PrintEditorActivity : Activity() {
 
             override fun onPrinterState(address: PrinterAddress?, state: PrinterState) {
                 runOnUiThread {
+                    // 注意：LPAPI 可能在 printerButton 尚未初始化（尚未切到「列印」分頁）時就回調
+                    // 直接存取會拋 UninitializedPropertyAccessException 導致 Activity 1 秒後閃退
+                    val btnOk = ::printerButton.isInitialized
                     when (state) {
                         PrinterState.Connected, PrinterState.Connected2 -> {
-                            printerButton.text = "已連線：${printerManager.printerName()}"
+                            if (btnOk) printerButton.text = "已連線：${printerManager.printerName()}"
                             toast("印表機連線成功")
                         }
                         PrinterState.Disconnected -> {
-                            printerButton.text = "選擇印表機"
-                            toast("印表機已斷線")
+                            if (btnOk) printerButton.text = "選擇印表機"
+                            // 避免在首次開啟就因初始狀態為 Disconnected 而誤顯示斷線提示
+                            // 只在曾經連線過的情況才 toast（以按鈕曾顯示過「已連線」為依據）
+                            // 這裡簡化：不主動 toast 斷線，由使用者操作時再提示
                         }
                         else -> Unit
                     }
@@ -739,19 +746,42 @@ class PrintEditorActivity : Activity() {
         refreshPager()
     }
 
-    private fun currentData() = LabelData().apply {
-        name = nameInput.text.toString()
-        barcode = barcodeInput.text.toString()
-        price = priceInput.text.toString()
-        member = memberPriceInput.text.toString()
-        nonMember = nonMemberPriceInput.text.toString()
-        showMember = memberMode.isChecked
-        nameSize = this@PrintEditorActivity.nameSize
-        priceSize = this@PrintEditorActivity.priceSize
-        barcodeLabelSize = this@PrintEditorActivity.barcodeLabelSize
-        barcodeHeight = this@PrintEditorActivity.barcodeHeight
-        barcodeScale = this@PrintEditorActivity.barcodeScale
-        barcodeType = this@PrintEditorActivity.barcodeType
+    private fun currentData(): LabelData {
+        // 首次 onDraw 可能在輸入框尚未初始化前呼叫（例如 preview 提前 layout），
+        // 此時直接以 prefs 草稿為後備，避免 UninitializedPropertyAccessException 閃退。
+        if (!::nameInput.isInitialized || !::priceInput.isInitialized ||
+            !::memberMode.isInitialized || !::barcodeInput.isInitialized
+        ) {
+            return LabelData().apply {
+                name = draftPrefs.getString("printName", "").orEmpty()
+                barcode = fullBarcodeValue.ifBlank { draftPrefs.getString("printBarcode", "").orEmpty() }
+                price = draftPrefs.getString("printPrice", "").orEmpty()
+                    .ifBlank { draftPrefs.getString("printNonMemberPrice", "").orEmpty() }
+                member = draftPrefs.getString("printMemberPrice", "").orEmpty()
+                nonMember = draftPrefs.getString("printNonMemberPrice", "").orEmpty().ifBlank { price }
+                showMember = member.isNotBlank()
+                nameSize = this@PrintEditorActivity.nameSize
+                priceSize = this@PrintEditorActivity.priceSize
+                barcodeLabelSize = this@PrintEditorActivity.barcodeLabelSize
+                barcodeHeight = this@PrintEditorActivity.barcodeHeight
+                barcodeScale = this@PrintEditorActivity.barcodeScale
+                barcodeType = this@PrintEditorActivity.barcodeType
+            }
+        }
+        return LabelData().apply {
+            name = nameInput.text.toString()
+            barcode = barcodeInput.text.toString()
+            price = priceInput.text.toString()
+            member = memberPriceInput.text.toString()
+            nonMember = nonMemberPriceInput.text.toString()
+            showMember = memberMode.isChecked
+            nameSize = this@PrintEditorActivity.nameSize
+            priceSize = this@PrintEditorActivity.priceSize
+            barcodeLabelSize = this@PrintEditorActivity.barcodeLabelSize
+            barcodeHeight = this@PrintEditorActivity.barcodeHeight
+            barcodeScale = this@PrintEditorActivity.barcodeScale
+            barcodeType = this@PrintEditorActivity.barcodeType
+        }
     }
 
     private fun select(e: LabelElement) {
@@ -857,52 +887,81 @@ class PrintEditorActivity : Activity() {
             return
         }
         discoveredPrinters.clear()
-        printerButton.text = "搜尋印表機中…"
-        printerManager.discover()
-        Handler(Looper.getMainLooper()).postDelayed({ showPrinterChoices() }, 1800)
+        if (::printerButton.isInitialized) printerButton.text = "搜尋印表機中…"
+        try {
+            printerManager.discover()
+        } catch (e: Exception) {
+            toast("啟動搜尋失敗：${e.message}")
+            return
+        }
+        pendingShow?.let { mainHandler.removeCallbacks(it) }
+        pendingShow = Runnable { if (!isFinishing && !isDestroyed) showPrinterChoices() }
+        mainHandler.postDelayed(pendingShow!!, 1800)
     }
 
     private fun showPrinterChoices() {
-        printerManager.stopDiscovery()
+        pendingShow?.let { mainHandler.removeCallbacks(it) }
+        pendingShow = null
+        try { printerManager.stopDiscovery() } catch (_: Exception) {}
+        if (isFinishing || isDestroyed) return
         val entries = discoveredPrinters.values.toList()
         if (entries.isEmpty()) {
-            printerButton.text = "選擇印表機"
+            if (::printerButton.isInitialized) printerButton.text = "選擇印表機"
             toast("找不到印表機，請確認印表機已開機並靠近手機")
             return
         }
         val labels = entries.map {
             it.shownName?.takeIf(String::isNotBlank) ?: it.macAddress.orEmpty()
         }.toTypedArray()
-        AlertDialog.Builder(this)
-            .setTitle("選擇印表機")
-            .setItems(labels) { _, which ->
-                printerButton.text = "連線中…"
-                if (!printerManager.connect(entries[which])) {
-                    printerButton.text = "選擇印表機"
-                    toast("無法提交連線要求")
+        try {
+            AlertDialog.Builder(this)
+                .setTitle("選擇印表機")
+                .setItems(labels) { _, which ->
+                    if (::printerButton.isInitialized) printerButton.text = "連線中…"
+                    try {
+                        if (!printerManager.connect(entries[which])) {
+                            if (::printerButton.isInitialized) printerButton.text = "選擇印表機"
+                            toast("無法提交連線要求")
+                        }
+                    } catch (e: Exception) {
+                        if (::printerButton.isInitialized) printerButton.text = "選擇印表機"
+                        toast("連線失敗：${e.message}")
+                    }
                 }
-            }
-            .setNegativeButton("取消", null)
-            .show()
+                .setNegativeButton("取消", null)
+                .show()
+        } catch (e: Exception) {
+            toast("顯示列表失敗：${e.message}")
+        }
     }
 
     private fun onPrintClicked() {
-        if (!printerManager.isConnected()) {
+        if (!::printerManager.isInitialized || !printerManager.isConnected()) {
             toast("請先選擇並連線印表機")
             page = 3
             refreshPager()
             discoverPrinters()
             return
         }
-        val bitmap = preview.renderBitmap()
-        val submitted = printerManager.print(
-            bitmap = bitmap,
-            copies = printCopies,
-            direction = printDirection,
-            gapLength = printGapLength,
-            density = printDensity,
-            speed = printSpeed,
-        )
+        val bitmap = try {
+            preview.renderBitmap()
+        } catch (e: Exception) {
+            toast("產生列印圖片失敗：${e.message}")
+            return
+        }
+        val submitted = try {
+            printerManager.print(
+                bitmap = bitmap,
+                copies = printCopies,
+                direction = printDirection,
+                gapLength = printGapLength,
+                density = printDensity,
+                speed = printSpeed,
+            )
+        } catch (e: Exception) {
+            toast("列印失敗：${e.message}")
+            false
+        }
         if (!submitted) toast("列印要求未能送出") else toast("已送出 ${bitmap.width} × ${bitmap.height} px 標籤")
     }
 
@@ -916,7 +975,9 @@ class PrintEditorActivity : Activity() {
     }
 
     override fun onDestroy() {
-        if (::printerManager.isInitialized) printerManager.close()
+        pendingShow?.let { mainHandler.removeCallbacks(it) }
+        pendingShow = null
+        if (::printerManager.isInitialized) try { printerManager.close() } catch (_: Exception) {}
         super.onDestroy()
     }
 
@@ -967,28 +1028,31 @@ class PrintEditorActivity : Activity() {
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            val data = read?.invoke() ?: return
+            val data = try { read?.invoke() } catch (_: Exception) { null } ?: return
             val dev = canvasInfo?.invoke() ?: LabelDevice.P1
-            computeLayout()
-            val geo = LabelGeometry(dev, data)
-            canvas.drawColor(Color.rgb(226, 226, 230))
-
-            // 白色標籤底
-            paint.style = Paint.Style.FILL
-            paint.color = Color.WHITE
-            canvas.drawRect(ox, oy, ox + dev.widthMm * pxPerMm, oy + dev.heightMm * pxPerMm, paint)
-
-            painter.draw(
-                canvas, geo, styles, pxPerMm, ox, oy,
-                selected, showSelection = true,
-            )
-
-            // 邊框與 mm 標尺
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = dp(1).toFloat()
-            paint.color = Color.rgb(170, 170, 175)
-            canvas.drawRect(ox, oy, ox + dev.widthMm * pxPerMm, oy + dev.heightMm * pxPerMm, paint)
-            drawRuler(canvas, dev)
+            try {
+                computeLayout()
+                val geo = LabelGeometry(dev, data)
+                canvas.drawColor(Color.rgb(226, 226, 230))
+                paint.style = Paint.Style.FILL
+                paint.color = Color.WHITE
+                canvas.drawRect(ox, oy, ox + dev.widthMm * pxPerMm, oy + dev.heightMm * pxPerMm, paint)
+                try {
+                    painter.draw(canvas, geo, styles, pxPerMm, ox, oy, selected, showSelection = true)
+                } catch (_: Exception) {
+                    // 繪製失敗時至少保留白底，避免整個 Activity 因一次繪製異常崩潰
+                    paint.style = Paint.Style.FILL; paint.color = Color.rgb(190, 45, 45)
+                    paint.textAlign = Paint.Align.CENTER; paint.textSize = dp(12).toFloat()
+                    canvas.drawText("預覽繪製失敗", ox + dev.widthMm * pxPerMm / 2f, oy + dev.heightMm * pxPerMm / 2f, paint)
+                }
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = dp(1).toFloat()
+                paint.color = Color.rgb(170, 170, 175)
+                canvas.drawRect(ox, oy, ox + dev.widthMm * pxPerMm, oy + dev.heightMm * pxPerMm, paint)
+                drawRuler(canvas, dev)
+            } catch (_: Exception) {
+                // computeLayout 也可能因異常尺寸拋錯，保持灰底即可
+            }
         }
 
         /** 每 10 mm 一道刻度與數字，方便確認實際尺寸。 */
