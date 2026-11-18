@@ -72,38 +72,34 @@ object RelatedWords {
     /**
      * 找出可接在 [word] 後面、應該顯示在候選列的關聯詞。
      *
-     * 排序原則：
-     * 1. 以尾字開頭的詞優先（「你好」→「好像、好看」），這是真正的接續；
-     * 2. 尾字找不到時，才用詞中其他字（「網站」→「站在」）；
-     * 3. 同一錨字內依詞頻排序（詞表本身已排好）；
-     * 4. 排除自身、已被 [exclude] 收錄的詞，以及「已經含在輸入內容裡」的重複詞。
+     * 規則：以詞的**最後一個中文字**為錨字（規格要求），取以它開頭的詞。
+     * 若尾字沒有對應詞條，才往前找前一個字墊檔，避免候選列整個空掉。
+     * 同一錨字內依詞頻排序（詞表本身已排序），並排除自身與 [exclude]。
      */
     fun related(word: String, exclude: Set<String> = emptySet(), limit: Int = 40): List<String> {
         if (word.isEmpty()) return emptyList()
         val out = LinkedHashSet<String>()
-        // 由尾字往前找錨字，確保「接續」的詞排在最前面
+        // 由尾字往前找錨字；第一個有詞的錨字就用它，不把不同錨字的詞混在一起
         for (i in word.length - 1 downTo 0) {
             val c = word[i]
             if (!isCjk(c)) continue
-            val list = index[c] ?: continue
-            for (w in list) {
-                if (w == word || w in exclude) continue
-                out.add(w)
-                if (out.size >= limit) break
-            }
-            if (out.size >= limit) break
-        }
-        if (out.size < limit) {
-            // 索引詞表沒有（或不足）時，退回手寫詞庫，讓功能不因缺資產而消失
-            for (c in word.reversed()) {
-                if (!isCjk(c)) continue
-                for ((w, _) in Dict.related(c.toString())) {
-                    if (w == word || w in exclude || w in out) continue
+            val list = index[c]
+            if (list != null) {
+                for (w in list) {
+                    if (w == word || w in exclude) continue
                     out.add(w)
                     if (out.size >= limit) break
                 }
-                if (out.size >= limit) break
             }
+            if (out.isEmpty()) {
+                // 索引沒有這個錨字（詞表較小）→ 退回手寫詞庫
+                for ((w, _) in Dict.related(c.toString())) {
+                    if (w == word || w in exclude) continue
+                    out.add(w)
+                    if (out.size >= limit) break
+                }
+            }
+            if (out.isNotEmpty()) break
         }
         return out.toList()
     }
