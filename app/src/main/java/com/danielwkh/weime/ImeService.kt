@@ -156,6 +156,8 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private val comp = StringBuilder()
     private var cands: List<Pair<String, Int>> = emptyList()
     private var relatedCands: List<Pair<String, Int>> = emptyList()
+    /** 目前顯示的關聯詞是接在哪個詞之後（用尾字續接）；空白表示不在關聯詞模式。 */
+    private var relatedTail = ""
     private val userWordFreq = LinkedHashMap<String, Long>()
     private val userWordFreqKey = "userWordFreq"
     private lateinit var kbRoot: KeyboardRoot
@@ -259,11 +261,12 @@ class ImeService : InputMethodService(), LifecycleOwner {
                 .thenBy { it.index }
         ).map { it.value }
 
-    private fun relatedWordsFor(word: String, existing: List<Pair<String, Int>>): List<Pair<String, Int>> {
-        val merged = LinkedHashMap<String, Pair<String, Int>>()
-        for (item in existing) if (item.first != word) merged[item.first] = item
-        for (item in Dict.related(word)) if (!merged.containsKey(item.first)) merged[item.first] = item
-        return sortByUserFrequency(merged.values.toList()).take(40)
+    /** 產生關聯詞候選；已使用過的詞會依本機累積頻率排前面。 */
+    private fun relatedWordsFor(word: String): List<Pair<String, Int>> {
+        if (word.isBlank()) return emptyList()
+        val out = ArrayList<Pair<String, Int>>()
+        for (w in RelatedWords.related(word)) out.add(w to 0)
+        return sortByUserFrequency(out).take(40)
     }
 
     override fun onCreate() {
@@ -283,7 +286,11 @@ class ImeService : InputMethodService(), LifecycleOwner {
         if (lastLetterMode !in 0..1) lastLetterMode = 0
         scheme = prefs.getInt("scheme", 0)
         if (scheme !in 0..3) scheme = 0
-        Thread { CjEngine.load(this) }.start()
+        Thread {
+            CjEngine.load(this)
+            // 關聯詞表（assets/related.tsv）一起在背景載入，避免第一次選字時卡頓
+            RelatedWords.load(this)
+        }.start()
     }
 
     override fun onDestroy() {
@@ -552,6 +559,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         comp.clear()
         cands = emptyList()
         relatedCands = emptyList()
+        relatedTail = ""
         if (::candBar.isInitialized) showCands()
         pending?.let {
             currentInputConnection?.commitText(it, 1)
@@ -1189,6 +1197,16 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
     private fun showCands() {
         candBar.removeAllViews()
+        // 關聯詞模式：前面加一個小標記，讓使用者知道這些是接續用詞
+        if (relatedCands.isNotEmpty() && comp.isEmpty() && relatedTail.isNotEmpty()) {
+            candBar.addView(TextView(this).apply {
+                text = "➜"
+                textSize = 14f
+                setTextColor(Color.parseColor("#8A8A8A"))
+                gravity = Gravity.CENTER
+                setPadding(dp(8), 0, dp(2), 0)
+            }, LinearLayout.LayoutParams(-2, dp(46)))
+        }
         for ((i, c) in cands.withIndex()) {
             candBar.addView(TextView(this).apply {
                 text = c.first
@@ -1206,7 +1224,11 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private fun onChar(c: Char) {
         when (mode) {
             0 -> {
-                if (comp.isEmpty()) relatedCands = emptyList()
+                // 開始輸入新字詞：清掉上一輪的關聯詞，換成新的候選結果
+                if (comp.isEmpty()) {
+                    relatedCands = emptyList()
+                    relatedTail = ""
+                }
                 // 速成滿 2 碼、倉頡滿 5 碼：先送出第一候選，再開始下一個字
                 if (scheme != 0 && comp.length >= CjEngine.maxLen(scheme)) commitAll()
                 comp.append(c)
@@ -1228,6 +1250,8 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private fun refresh() {
         ic?.setComposingText(compDisplay(), 1)
         var missing = false
+        // 開始新的組字就離開關聯詞模式；組字清空時改顯示關聯詞
+        if (comp.isNotEmpty()) relatedTail = ""
         cands = if (comp.isEmpty()) {
             relatedCands
         } else if (cjActive()) {
@@ -1607,6 +1631,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         comp.setLength(0)
         cands = emptyList()
         relatedCands = emptyList()
+        relatedTail = ""
         ic?.setComposingText("", 1)
         showCands()
     }
@@ -1624,24 +1649,46 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
     private fun pick(c: Pair<String, Int>) {
         recordWord(c.first)
-        if (comp.length <= c.second) relatedCands = relatedWordsFor(c.first, cands)
+        val composing = comp.isNotEmpty()
+        if (composing) {
+            // 選的是輸入中的候選字：以這個詞作為接下來關聯詞的起點
+            relatedTail = c.first
+            ic?.commitText(conv(c.first), 1)
+            comp.delete(0, minOf(c.second, comp.length))
+            if (comp.isEmpty()) {
+                // 整串拼音都送完了 → 直接進關聯詞模式，顯示下一層
+                relatedCands = relatedWordsFor(c.first)
+                refresh()
+            } else {
+                relatedCands = emptyList()
+                relatedTail = ""
+                refresh()
+            }
+            return
+        }
+        // 不在組字狀態：點的是關聯詞，繼續以它的尾字往下接
         ic?.commitText(conv(c.first), 1)
-        comp.delete(0, minOf(c.second, comp.length))
-        refresh()
+        relatedTail = c.first
+        relatedCands = relatedWordsFor(c.first)
+        cands = relatedCands
+        showCands()
     }
 
     private fun commit(s: String) { ic?.commitText(conv(s), 1) }
 
     /** 把正在輸入的拼音全部送出（有候選字就選第一個，沒有就送原字母）。 */
     private fun commitAll() {
-        while (comp.isNotEmpty()) {
-            if (cands.isNotEmpty()) pick(cands[0])
+        var guard = 0
+        while (comp.isNotEmpty() && guard++ < 32) {
+            if (cands.isNotEmpty() && cands[0].second > 0) pick(cands[0])
             else {
                 val completed = compDisplay()
                 recordWord(completed)
-                relatedCands = relatedWordsFor(completed, emptyList())
                 ic?.commitText(completed, 1)
                 comp.clear()
+                // 送出後直接進關聯詞模式，候選列顯示可接續的詞
+                relatedTail = completed
+                relatedCands = relatedWordsFor(completed)
                 cands = relatedCands
                 showCands()
             }
@@ -1651,15 +1698,37 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private fun onSpace() {
         if (mode == 0 && comp.isNotEmpty()) {
             if (cands.isNotEmpty()) pick(cands[0]) else commitAll()
-        } else commit(" ")
+        } else {
+            // 空白鍵：結束這一輪關聯詞，恢復一般工具列
+            if (relatedCands.isNotEmpty()) {
+                relatedCands = emptyList()
+                relatedTail = ""
+                cands = emptyList()
+                showCands()
+            }
+            commit(" ")
+        }
     }
 
-    private fun onPunc(s: String) { commitAll(); commit(s) }
+    private fun onPunc(s: String) { commitAll(); commit(s); clearRelated() }
+
+    /** 標點或換行代表句子結束，關聯詞不再接續。 */
+    private fun clearRelated() {
+        if (relatedCands.isEmpty() && relatedTail.isEmpty()) return
+        relatedCands = emptyList()
+        relatedTail = ""
+        if (comp.isEmpty()) cands = emptyList()
+        showCands()
+    }
 
     private fun onBackspace() {
         if (comp.isNotEmpty()) {
             comp.deleteCharAt(comp.length - 1)
             refresh()
+        } else if (relatedCands.isNotEmpty()) {
+            // 組字已清空時按刪除：先收起關聯詞，再刪掉一個字元
+            clearRelated()
+            sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
         } else sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
     }
 
@@ -1667,9 +1736,12 @@ class ImeService : InputMethodService(), LifecycleOwner {
         if (comp.isNotEmpty()) {
             val completed = compDisplay()
             recordWord(completed)
-            relatedCands = relatedWordsFor(completed, cands)
             ic?.commitText(completed, 1)
-            comp.clear(); cands = relatedCands; showCands()
+            comp.clear()
+            relatedTail = completed
+            relatedCands = relatedWordsFor(completed)
+            cands = relatedCands
+            showCands()
             return
         }
         val ei = currentInputEditorInfo
@@ -1958,12 +2030,18 @@ class ImeService : InputMethodService(), LifecycleOwner {
         }
     }
 
-    /** 依狀態決定頂部顯示什麼：候選字（輸入中）> 剛複製的文字 > 工具欄。 */
+    /**
+     * 依狀態決定頂部顯示什麼：
+     * 候選字（輸入中或剛完成的關聯詞）> 剛複製的文字 > 工具欄。
+     *
+     * 注意：關聯詞是在組字清空「之後」才產生的，所以不能只看 comp 是否為空，
+     * 必須同時看 relatedCands，否則相關詞一算出來就會被工具列蓋掉。
+     */
     private fun updateTop() {
         if (!::midFrame.isInitialized) return
         if (clipSuggest != null && SystemClock.elapsedRealtime() - clipTime > 180000) clipSuggest = null
         val showProductCand = choosingProduct
-        val showCand = !showProductCand && (notice || comp.isNotEmpty())
+        val showCand = !showProductCand && (notice || comp.isNotEmpty() || relatedCands.isNotEmpty())
         val showChip = !showCand && clipSuggest != null
         candScroll.visibility = if (showCand) View.VISIBLE else View.GONE
         productCandScroll.visibility = if (showProductCand) View.VISIBLE else View.GONE

@@ -5,4 +5,7 @@ local.properties
 *.iml
 .DS_Store
 app/src/main/jniLibs/
-app/src/main/assets/
+# 大字表由 scripts/fetch-ime-data.sh 在編譯時下載，不進版控
+app/src/main/assets/*
+# 關聯詞表較小且是功能核心，直接進版控（無需下載也能運作）
+!app/src/main/assets/related.tsv
