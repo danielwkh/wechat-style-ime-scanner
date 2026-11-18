@@ -72,7 +72,8 @@ class KeyboardRoot(
     private var accX = 0f
     private var accY = 0f
     private var longPressed = false
-    private val slop = ViewConfiguration.get(ctx).scaledTouchSlop
+    // 動作感應降敏 50%：需要更明確的位移才進入游標拖動。
+    private val slop = ViewConfiguration.get(ctx).scaledTouchSlop * 2
 
     private fun cancelChildren() {
         val now = SystemClock.uptimeMillis()
@@ -260,7 +261,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
     override fun onCreateInputView(): View {
         kbRoot = KeyboardRoot(
-            this, dp(9), dp(30),
+            this, dp(18), dp(60),
             onStart = { cursorStart() },
             onMove = { dx, dy -> moveCursor(dx, dy) },
             onEnd = { keyArea.alpha = 1f }
@@ -817,23 +818,23 @@ class ImeService : InputMethodService(), LifecycleOwner {
                             // 數字／符號已輸出；繼續移動不啟動游標拖動。
                         } else if (popup != null) {
                             updateChoice(e.rawX)
-                        } else if (!draggingCursor && (abs(e.x - downX) > ViewConfiguration.get(this@ImeService).scaledTouchSlop || abs(e.y - downY) > ViewConfiguration.get(this@ImeService).scaledTouchSlop)) {
+                        } else if (!draggingCursor && (abs(e.x - downX) > ViewConfiguration.get(this@ImeService).scaledTouchSlop * 2 || abs(e.y - downY) > ViewConfiguration.get(this@ImeService).scaledTouchSlop * 2)) {
                             handler.removeCallbacks(showChoiceRun)
                             draggingCursor = true
                             cursorStart()
                             accX = e.x - downX; accY = e.y - downY
                             lastX = e.x; lastY = e.y
-                            while (accX >= dp(9)) { moveCursor(1, 0); accX -= dp(9) }
-                            while (accX <= -dp(9)) { moveCursor(-1, 0); accX += dp(9) }
-                            while (accY >= dp(30)) { moveCursor(0, 1); accY -= dp(30) }
-                            while (accY <= -dp(30)) { moveCursor(0, -1); accY += dp(30) }
+                            while (accX >= dp(18)) { moveCursor(1, 0); accX -= dp(18) }
+                            while (accX <= -dp(18)) { moveCursor(-1, 0); accX += dp(18) }
+                            while (accY >= dp(60)) { moveCursor(0, 1); accY -= dp(60) }
+                            while (accY <= -dp(60)) { moveCursor(0, -1); accY += dp(60) }
                         } else if (draggingCursor) {
                             accX += e.x - lastX; accY += e.y - lastY
                             lastX = e.x; lastY = e.y
-                            while (accX >= dp(9)) { moveCursor(1, 0); accX -= dp(9) }
-                            while (accX <= -dp(9)) { moveCursor(-1, 0); accX += dp(9) }
-                            while (accY >= dp(30)) { moveCursor(0, 1); accY -= dp(30) }
-                            while (accY <= -dp(30)) { moveCursor(0, -1); accY += dp(30) }
+                            while (accX >= dp(18)) { moveCursor(1, 0); accX -= dp(18) }
+                            while (accX <= -dp(18)) { moveCursor(-1, 0); accX += dp(18) }
+                            while (accY >= dp(60)) { moveCursor(0, 1); accY -= dp(60) }
+                            while (accY <= -dp(60)) { moveCursor(0, -1); accY += dp(60) }
                         }
                     }
                     MotionEvent.ACTION_UP -> {
@@ -938,23 +939,23 @@ class ImeService : InputMethodService(), LifecycleOwner {
                         altTriggered = true
                         commit(altDigit.toString())
                         saveState()
-                    } else if (!altTriggered && !voiceHold && !cursorDrag && (abs(e.x - downX) > ViewConfiguration.get(this).scaledTouchSlop || abs(e.y - downY) > ViewConfiguration.get(this).scaledTouchSlop)) {
+                    } else if (!altTriggered && !voiceHold && !cursorDrag && (abs(e.x - downX) > ViewConfiguration.get(this).scaledTouchSlop * 2 || abs(e.y - downY) > ViewConfiguration.get(this).scaledTouchSlop * 2)) {
                         handler.removeCallbacks(voiceRun)
                         cursorDrag = true
                         cursorStart()
                         accX = e.x - downX; accY = e.y - downY
                         lastX = e.x; lastY = e.y
-                        while (accX >= dp(9)) { moveCursor(1, 0); accX -= dp(9) }
-                        while (accX <= -dp(9)) { moveCursor(-1, 0); accX += dp(9) }
-                        while (accY >= dp(30)) { moveCursor(0, 1); accY -= dp(30) }
-                        while (accY <= -dp(30)) { moveCursor(0, -1); accY += dp(30) }
+                        while (accX >= dp(18)) { moveCursor(1, 0); accX -= dp(18) }
+                        while (accX <= -dp(18)) { moveCursor(-1, 0); accX += dp(18) }
+                        while (accY >= dp(60)) { moveCursor(0, 1); accY -= dp(60) }
+                        while (accY <= -dp(60)) { moveCursor(0, -1); accY += dp(60) }
                     } else if (cursorDrag) {
                         accX += e.x - lastX; accY += e.y - lastY
                         lastX = e.x; lastY = e.y
-                        while (accX >= dp(9)) { moveCursor(1, 0); accX -= dp(9) }
-                        while (accX <= -dp(9)) { moveCursor(-1, 0); accX += dp(9) }
-                        while (accY >= dp(30)) { moveCursor(0, 1); accY -= dp(30) }
-                        while (accY <= -dp(30)) { moveCursor(0, -1); accY += dp(30) }
+                        while (accX >= dp(18)) { moveCursor(1, 0); accX -= dp(18) }
+                        while (accX <= -dp(18)) { moveCursor(-1, 0); accX += dp(18) }
+                        while (accY >= dp(60)) { moveCursor(0, 1); accY -= dp(60) }
+                        while (accY <= -dp(60)) { moveCursor(0, -1); accY += dp(60) }
                     }
                 }
                 MotionEvent.ACTION_UP -> {
@@ -1481,7 +1482,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         var downY = 0f
         var lastX = 0f
         var accX = 0f
-        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop * 2
         val longRun = Runnable {
             if (touching) {
                 triggered = true
@@ -1516,8 +1517,8 @@ class ImeService : InputMethodService(), LifecycleOwner {
                         cursorStart()
                         accX = dx
                         lastX = e.x
-                        while (accX >= dp(9)) { moveCursor(1, 0); accX -= dp(9) }
-                        while (accX <= -dp(9)) { moveCursor(-1, 0); accX += dp(9) }
+                        while (accX >= dp(18)) { moveCursor(1, 0); accX -= dp(18) }
+                        while (accX <= -dp(18)) { moveCursor(-1, 0); accX += dp(18) }
                     } else if (!triggered && !cursorDrag && upSwipe) {
                         handler.removeCallbacks(longRun)
                         triggered = true
@@ -1526,8 +1527,8 @@ class ImeService : InputMethodService(), LifecycleOwner {
                     } else if (cursorDrag) {
                         accX += e.x - lastX
                         lastX = e.x
-                        while (accX >= dp(9)) { moveCursor(1, 0); accX -= dp(9) }
-                        while (accX <= -dp(9)) { moveCursor(-1, 0); accX += dp(9) }
+                        while (accX >= dp(18)) { moveCursor(1, 0); accX -= dp(18) }
+                        while (accX <= -dp(18)) { moveCursor(-1, 0); accX += dp(18) }
                     } else if (abs(dy) > touchSlop || abs(dx) > key.width / 2f) {
                         moved = true
                         handler.removeCallbacks(longRun)
