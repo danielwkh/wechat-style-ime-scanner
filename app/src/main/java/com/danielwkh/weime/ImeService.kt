@@ -3,6 +3,7 @@ package com.danielwkh.weime
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ClipboardManager
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -51,6 +52,7 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.util.concurrent.Executors
 import org.json.JSONArray
+import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.sqrt
 
@@ -153,6 +155,9 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private var shift = false
     private val comp = StringBuilder()
     private var cands: List<Pair<String, Int>> = emptyList()
+    private var relatedCands: List<Pair<String, Int>> = emptyList()
+    private val userWordFreq = LinkedHashMap<String, Long>()
+    private val userWordFreqKey = "userWordFreq"
     private lateinit var kbRoot: KeyboardRoot
     private lateinit var candBar: LinearLayout
     private lateinit var keyArea: LinearLayout
@@ -227,6 +232,33 @@ class ImeService : InputMethodService(), LifecycleOwner {
         prefs.edit().putInt("mode", mode).putInt("last", lastLetterMode).putInt("scheme", scheme).putBoolean("shift", shift).apply()
     }
 
+    private fun loadUserWordFreq() {
+        userWordFreq.clear()
+        try {
+            val obj = JSONObject(prefs.getString(userWordFreqKey, "{}"))
+            for (key in obj.keys()) userWordFreq[key] = obj.optLong(key, 0L)
+        } catch (_: Exception) { }
+    }
+
+    private fun saveUserWordFreq() {
+        val obj = JSONObject()
+        for ((word, count) in userWordFreq) obj.put(word, count)
+        prefs.edit().putString(userWordFreqKey, obj.toString()).apply()
+    }
+
+    private fun recordWord(word: String) {
+        val value = word.trim()
+        if (value.isEmpty() || value.length > 80 || value.any { it.isWhitespace() }) return
+        userWordFreq[value] = (userWordFreq[value] ?: 0L) + 1L
+        saveUserWordFreq()
+    }
+
+    private fun sortByUserFrequency(values: List<Pair<String, Int>>): List<Pair<String, Int>> =
+        values.withIndex().sortedWith(
+            compareByDescending<IndexedValue<Pair<String, Int>>> { userWordFreq[it.value.first] ?: 0L }
+                .thenBy { it.index }
+        ).map { it.value }
+
     override fun onCreate() {
         super.onCreate()
         registry.currentState = Lifecycle.State.CREATED
@@ -237,6 +269,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         scanClearEnabled = prefs.getBoolean("scanClearEnabled", true)
         fullCodeEnabled = prefs.getBoolean("fullCodeEnabled", false)
         simplified = prefs.getBoolean("simp", false)
+        loadUserWordFreq()
         loadClips()
         try { cm.addPrimaryClipChangedListener(clipListener) } catch (_: Exception) {}
         if (mode !in 0..3) mode = 0
@@ -511,6 +544,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
         super.onStartInput(attribute, restarting)
         comp.clear()
         cands = emptyList()
+        relatedCands = emptyList()
         if (::candBar.isInitialized) showCands()
         pending?.let {
             currentInputConnection?.commitText(it, 1)
@@ -1165,6 +1199,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private fun onChar(c: Char) {
         when (mode) {
             0 -> {
+                if (comp.isEmpty()) relatedCands = emptyList()
                 // 速成滿 2 碼、倉頡滿 5 碼：先送出第一候選，再開始下一個字
                 if (scheme != 0 && comp.length >= CjEngine.maxLen(scheme)) commitAll()
                 comp.append(c)
@@ -1186,11 +1221,14 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private fun refresh() {
         ic?.setComposingText(compDisplay(), 1)
         var missing = false
-        cands = if (cjActive()) {
+        cands = if (comp.isEmpty()) {
+            relatedCands
+        } else if (cjActive()) {
             val r = CjEngine.lookup(this, scheme, comp.toString())
             missing = r.isEmpty() && comp.isNotEmpty() && !CjEngine.isReady(scheme)
             r
         } else Dict.lookup(comp.toString())
+        cands = sortByUserFrequency(cands)
         showCands()
         if (missing && !cjWarned) {
             cjWarned = true
@@ -1561,6 +1599,7 @@ class ImeService : InputMethodService(), LifecycleOwner {
     private fun clearComp() {
         comp.setLength(0)
         cands = emptyList()
+        relatedCands = emptyList()
         ic?.setComposingText("", 1)
         showCands()
     }
@@ -1577,6 +1616,8 @@ class ImeService : InputMethodService(), LifecycleOwner {
     }
 
     private fun pick(c: Pair<String, Int>) {
+        recordWord(c.first)
+        if (comp.length <= c.second) relatedCands = cands.filter { it.first != c.first }
         ic?.commitText(conv(c.first), 1)
         comp.delete(0, minOf(c.second, comp.length))
         refresh()
@@ -1589,9 +1630,12 @@ class ImeService : InputMethodService(), LifecycleOwner {
         while (comp.isNotEmpty()) {
             if (cands.isNotEmpty()) pick(cands[0])
             else {
-                ic?.commitText(compDisplay(), 1)
+                val completed = compDisplay()
+                recordWord(completed)
+                ic?.commitText(completed, 1)
                 comp.clear()
                 cands = emptyList()
+                relatedCands = emptyList()
                 showCands()
             }
         }
@@ -1614,7 +1658,10 @@ class ImeService : InputMethodService(), LifecycleOwner {
 
     private fun onEnter() {
         if (comp.isNotEmpty()) {
-            ic?.commitText(compDisplay(), 1)
+            val completed = compDisplay()
+            recordWord(completed)
+            relatedCands = cands.filter { it.first != completed }
+            ic?.commitText(completed, 1)
             comp.clear(); cands = emptyList(); showCands()
             return
         }
@@ -2511,6 +2558,10 @@ class ImeService : InputMethodService(), LifecycleOwner {
             true
         }
         if (!emitted) return
+        // 掃描輸出成功後，自動複製與實際輸出完全相同的品名或條碼。
+        try {
+            cm.setPrimaryClip(ClipData.newPlainText("Scanner Input", text))
+        } catch (_: Exception) { }
         // 等輸入框把新內容處理完，再觸發 Enter／搜尋／送出（只觸發一次）
         handler.postDelayed({ onEnter() }, 200)
     }
