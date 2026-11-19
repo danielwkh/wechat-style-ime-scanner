@@ -1666,10 +1666,18 @@ class ImeService : InputMethodService(), LifecycleOwner {
             }
             return
         }
-        // 不在組字狀態：點的是關聯詞，繼續以它的尾字往下接
-        ic?.commitText(conv(c.first), 1)
-        relatedTail = c.first
-        relatedCands = relatedWordsFor(c.first)
+        // 不在組字狀態：點的是關聯詞。關聯詞一定以錨字（上一輪詞的尾字）開頭，
+        // 若直接提交全詞會變成「我」+「我們」=「我我們」重疊。因此只提交去重後的後綴。
+        val w = c.first
+        val dedup = if (relatedTail.isNotEmpty() && w.isNotEmpty() && w[0] == relatedTail.last()) {
+            // 例如 上一輪「我」→ 顯示「我們」，實際只提交「们」避免重疊
+            // 上一輪「你好」→ 顯示「好像」，只提交「像」
+            w.substring(1)
+        } else w
+        if (dedup.isNotEmpty()) ic?.commitText(conv(dedup), 1)
+        // 下一輪仍以完整詞的尾字為錨字，例如「我們」的尾字「们」繼續找關聯詞
+        relatedTail = w
+        relatedCands = relatedWordsFor(w)
         cands = relatedCands
         showCands()
     }
