@@ -1208,8 +1208,17 @@ class ImeService : InputMethodService(), LifecycleOwner {
             }, LinearLayout.LayoutParams(-2, dp(46)))
         }
         for ((i, c) in cands.withIndex()) {
+            // 關聯詞模式：候選顯示也去重（與提交去重一致）
+            // 例如 上一輪「我」→ 候選全詞「我们」→ 顯示「们」
+            //      上一輪「你好」→ 候選「好像」→ 顯示「像」
+            // 內部 pick() 仍用全詞做下一輪尾字與頻率統計
+            val display = if (comp.isEmpty() && relatedTail.isNotEmpty() && relatedCands.isNotEmpty()
+                && c.first.isNotEmpty() && c.first[0] == relatedTail.last()
+            ) c.first.substring(1) else c.first
+            // 全詞與單字相同（已被過濾）或去重後為空的不顯示
+            if (display.isEmpty()) continue
             candBar.addView(TextView(this).apply {
-                text = c.first
+                text = display
                 textSize = 20f
                 setTextColor(if (i == 0) Color.parseColor("#07C160") else Color.WHITE)
                 gravity = Gravity.CENTER
