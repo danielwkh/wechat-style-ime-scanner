@@ -422,6 +422,9 @@ class PrintEditorActivity : Activity() {
             background = roundedBg(C_FIELD_BG, dp(9).toFloat(), C_BORDER, dp(1))
             setSingleLine(true)
             if (initial.isNotEmpty()) setText(initial)
+            onFocusChangeListener = View.OnFocusChangeListener { _, hasFocus ->
+                background = roundedBg(if(hasFocus) Color.WHITE else C_FIELD_BG, dp(9).toFloat(), if(hasFocus) C_GREEN else C_BORDER, if(hasFocus) dp(1) else dp(1))
+            }
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, a:Int,b:Int,c:Int)=Unit
                 override fun onTextChanged(s: CharSequence?, a:Int,b:Int,c:Int){ if (::preview.isInitialized) preview.invalidate() }
@@ -430,30 +433,73 @@ class PrintEditorActivity : Activity() {
         }
     }
 
+    // 縮略圖：70×40 比例的迷你標籤示意
+    private fun templateThumb(isMember: Boolean): View {
+        val thumb = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundedBg(Color.WHITE, dp(6).toFloat(), C_BORDER, dp(1))
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+        }
+        val nameBar = View(this).apply { setBackgroundColor(Color.parseColor("#E8E8EB")) }
+        thumb.addView(nameBar, LinearLayout.LayoutParams(-1, dp(8)).apply{ bottomMargin=dp(4)})
+        val bottomRow = LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
+        val barcodeBox = LinearLayout(this).apply { setBackgroundColor(Color.parseColor("#1C1C1E")); setPadding(dp(2), dp(2), dp(2), dp(2)) }
+        for (k in 0 until 4) {
+            val stripe = View(this).apply { setBackgroundColor(Color.WHITE) }
+            barcodeBox.addView(stripe, LinearLayout.LayoutParams(dp(2), dp(12)).apply { setMargins(dp(1), 0, dp(1), 0) })
+        }
+        bottomRow.addView(barcodeBox, LinearLayout.LayoutParams(0, dp(18), 0.42f).apply{ setMargins(0,0,dp(4),0)})
+        if (isMember) {
+            val priceCol = LinearLayout(this).apply { orientation=LinearLayout.VERTICAL }
+            priceCol.addView(View(this).apply{ setBackgroundColor(Color.parseColor("#1C1C1E")) }, LinearLayout.LayoutParams(-1, dp(9)).apply{ bottomMargin=dp(2)})
+            priceCol.addView(View(this).apply{ setBackgroundColor(Color.parseColor("#F0F0F0")); background=roundedBg(Color.WHITE, dp(2).toFloat(), C_BORDER, dp(1)) }, LinearLayout.LayoutParams(-1, dp(9)))
+            bottomRow.addView(priceCol, LinearLayout.LayoutParams(0, -2, 0.58f))
+        } else {
+            bottomRow.addView(View(this).apply{ setBackgroundColor(Color.parseColor("#07C160")); background=roundedBg(Color.parseColor("#07C160"), dp(3).toFloat()) }, LinearLayout.LayoutParams(0, dp(18), 0.58f))
+        }
+        thumb.addView(bottomRow, LinearLayout.LayoutParams(-1, -2))
+        return thumb
+    }
+
     private fun buildContentPage(): View {
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        col.addView(hintText("掃描條碼或選擇商品後，品名、條碼與價格會自動帶入預覽，並依是否有會員價自動切換成員版。"))
-        // template cards
+        col.addView(hintText("掃描條碼或選擇商品後，品名、條碼與價格會自動帶入預覽，並依是否有會員價自動切換。"))
+        // template cards with thumbnails
         val card1 = sectionCard()
         card1.addView(cardTitle("模板樣式"))
         val rowT = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        fun templateCard2(title: String, sub: String, isSel: Boolean, onClick: ()->Unit): View {
+        val templateCards = mutableListOf<View>()
+        fun refreshTemplateCards(){
+            val isMem = try{ memberMode.isChecked } catch(_:Exception){ false }
+            for((idx, card) in templateCards.withIndex()){
+                val shouldSel = if(idx==0) !isMem else isMem
+                card.background = roundedBg(if(shouldSel) Color.parseColor("#E8F5E9") else C_FIELD_BG, dp(10).toFloat(), if(shouldSel) C_GREEN else C_BORDER, if(shouldSel) dp(2) else dp(1))
+                (card as LinearLayout).getChildAt(0).let{ (it as TextView).text = if(shouldSel) "✓" else "○"; it.setTextColor(if(shouldSel) C_GREEN else C_TEXT3) }
+                (card.getChildAt(1) as TextView).paint.isFakeBoldText = shouldSel
+            }
+            updateTemplateSummary()
+        }
+        fun makeTemplateCard(title: String, sub: String, isForMember: Boolean): View {
+            val isSelInit = try{ if(isForMember) memberMode.isChecked else !memberMode.isChecked } catch(_:Exception){ !isForMember }
             val c = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
-                background = roundedBg(if(isSel) Color.parseColor("#E8F5E9") else C_FIELD_BG, dp(10).toFloat(), if(isSel) C_GREEN else C_BORDER, if(isSel) dp(2) else dp(1))
+                background = roundedBg(if(isSelInit) Color.parseColor("#E8F5E9") else C_FIELD_BG, dp(10).toFloat(), if(isSelInit) C_GREEN else C_BORDER, if(isSelInit) dp(2) else dp(1))
                 setPadding(dp(10), dp(12), dp(10), dp(12))
-                isClickable = true; isFocusable = true; setOnClickListener { onClick() }
+                isClickable = true; isFocusable = true
             }
-            c.addView(TextView(this).apply { text = if(isSel) "✓" else "○"; textSize=16f; setTextColor(if(isSel) C_GREEN else C_TEXT3); gravity=Gravity.CENTER }, LinearLayout.LayoutParams(-1, -2))
-            c.addView(TextView(this).apply { text = title; textSize=13f; setTextColor(C_TEXT); gravity=Gravity.CENTER; paint.isFakeBoldText=isSel }, LinearLayout.LayoutParams(-1,-2).apply{ topMargin=dp(4)})
-            c.addView(TextView(this).apply { text = sub; textSize=11f; setTextColor(C_TEXT2); gravity=Gravity.CENTER }, LinearLayout.LayoutParams(-1,-2))
+            c.addView(TextView(this).apply { text=if(isSelInit)"✓" else "○"; textSize=14f; setTextColor(if(isSelInit) C_GREEN else C_TEXT3); gravity=Gravity.CENTER })
+            c.addView(templateThumb(isForMember), LinearLayout.LayoutParams(dp(72), dp(36)).apply{ topMargin=dp(6); bottomMargin=dp(6)})
+            c.addView(TextView(this).apply { text=title; textSize=13f; setTextColor(C_TEXT); gravity=Gravity.CENTER; paint.isFakeBoldText=isSelInit })
+            c.addView(TextView(this).apply { text=sub; textSize=10f; setTextColor(C_TEXT2); gravity=Gravity.CENTER })
+            c.setOnClickListener{
+                if(!::memberMode.isInitialized) return@setOnClickListener
+                memberMode.isChecked = isForMember
+            }
             return c
         }
-        val isMember = try { memberMode.isChecked } catch(_: Exception){ false }
-        // We'll rebuild after inputs; create placeholder first, then update via refreshTemplate logic later
-        // Use two cards side by side
-        val t1 = templateCard2("無會員價","右側單一大價", !isMember) { if (::memberMode.isInitialized){ memberMode.isChecked=false }}
-        val t2 = templateCard2("會員價版","Member / Price", isMember) { if (::memberMode.isInitialized){ memberMode.isChecked=true }}
+        val t1 = makeTemplateCard("無會員價","右側單一大價", false)
+        val t2 = makeTemplateCard("會員價版","Member / Price", true)
+        templateCards.add(t1); templateCards.add(t2)
         rowT.addView(t1, LinearLayout.LayoutParams(0, -2, 1f).apply{ setMargins(0,0,dp(8),0)})
         rowT.addView(t2, LinearLayout.LayoutParams(0, -2, 1f))
         card1.addView(rowT)
@@ -461,26 +507,34 @@ class PrintEditorActivity : Activity() {
         card1.addView(templateSummary)
         col.addView(card1, LinearLayout.LayoutParams(-1,-2).apply{ bottomMargin=dp(12)})
 
-        // size chips
+        // size chips - dynamic without rebuild
         val cardSize = sectionCard()
         cardSize.addView(cardTitle("標籤尺寸"))
         val sizeRow = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val sizeChips = mutableListOf<TextView>()
+        fun refreshSizeChips(){
+            for((idx, chip) in sizeChips.withIndex()){
+                val d = LabelDevice.values()[idx]
+                val isSel = d == device
+                chip.text = (if(isSel)"● " else "○ ") + when(d){ LabelDevice.P1->"中標籤 70×40 mm  · 203 dpi"; LabelDevice.P1P->"中標籤 70×40 mm  · 300 dpi（更清晰）"; LabelDevice.DP40->"大標籤 180×100 mm · 203 dpi"}
+                chip.setTextColor(if(isSel) C_TEXT else C_TEXT2)
+                chip.background = roundedBg(if(isSel) Color.parseColor("#E8F5E9") else C_FIELD_BG, dp(8).toFloat(), if(isSel) C_GREEN else C_BORDER_LIGHT, dp(1))
+            }
+            updateTemplateSummary(); updateSizeLabel()
+        }
         for (d in LabelDevice.values()) {
-            val label = when(d){ LabelDevice.P1->"中標籤 70×40 mm  · 203 dpi"; LabelDevice.P1P->"中標籤 70×40 mm  · 300 dpi（更清晰）"; LabelDevice.DP40->"大標籤 180×100 mm · 203 dpi"}
-            val isSel = d == device
             val chip = TextView(this).apply {
-                text = (if(isSel)"● " else "○ ") + label; textSize=13f; setTextColor(if(isSel) C_TEXT else C_TEXT2)
-                setPadding(dp(12), dp(10), dp(12), dp(10))
-                background = roundedBg(if(isSel) Color.parseColor("#E8F5E9") else C_FIELD_BG, dp(8).toFloat(), if(isSel) C_GREEN else C_BORDER_LIGHT, dp(1))
-                setOnClickListener {
-                    device = d; updateSizeLabel(); preview.invalidate(); saveAll()
+                textSize=13f; setPadding(dp(12), dp(10), dp(12), dp(10))
+                setOnClickListener{
+                    device = d; preview.invalidate(); saveAll()
                     val geo = LabelGeometry(device, currentData()); for((k,st) in styles) geo.clamp(st, geo.base(k)); preview.invalidate()
-                    // rebuild size card to reflect selection
-                    pageViews2.remove(0); if(page==0) refreshPager()
+                    refreshSizeChips()
                 }
             }
+            sizeChips.add(chip)
             sizeRow.addView(chip, LinearLayout.LayoutParams(-1,-2).apply{ topMargin=dp(6)})
         }
+        refreshSizeChips()
         cardSize.addView(sizeRow)
         col.addView(cardSize, LinearLayout.LayoutParams(-1,-2).apply{ bottomMargin=dp(12)})
 
@@ -496,9 +550,7 @@ class PrintEditorActivity : Activity() {
             setOnCheckedChangeListener { _, checked ->
                 memberPriceInput.visibility = if(checked) View.VISIBLE else View.GONE
                 nonMemberPriceInput.visibility = if(checked) View.VISIBLE else View.GONE
-                updateTemplateSummary(); preview.invalidate()
-                // also need to refresh template cards selection visuals
-                pageViews2.remove(0)
+                refreshTemplateCards(); preview.invalidate()
             }
         }
         cardProd.addView(nameInput, LinearLayout.LayoutParams(-1, dp(44)).apply{ topMargin=dp(6)})
@@ -507,8 +559,6 @@ class PrintEditorActivity : Activity() {
         cardProd.addView(memberPriceInput, LinearLayout.LayoutParams(-1, dp(44)).apply{ topMargin=dp(8)})
         cardProd.addView(nonMemberPriceInput, LinearLayout.LayoutParams(-1, dp(44)).apply{ topMargin=dp(8)})
         col.addView(cardProd)
-
-        // preload from prefs
         try {
             nameInput.setText(draftPrefs.getString("printName","").orEmpty())
             val dpPrice = draftPrefs.getString("printPrice","").orEmpty()
@@ -521,8 +571,7 @@ class PrintEditorActivity : Activity() {
             memberPriceInput.visibility = if(hasMember) View.VISIBLE else View.GONE
             nonMemberPriceInput.visibility = if(hasMember) View.VISIBLE else View.GONE
         } catch(_: Exception){}
-        // post update summary after layout
-        col.post { updateTemplateSummary() }
+        col.post { refreshTemplateCards(); refreshSizeChips() }
         return col
     }
 
@@ -644,13 +693,6 @@ class PrintEditorActivity : Activity() {
         val col = LinearLayout(this).apply{ orientation=LinearLayout.VERTICAL }
         val cardP = sectionCard()
         cardP.addView(cardTitle("印表機"))
-        printerButton = TextView(this).apply{
-            text="選擇印表機"; textSize=14f; gravity=Gravity.CENTER; setTextColor(Color.WHITE)
-            setPadding(dp(16),dp(12),dp(16),dp(12))
-            background=pillBg(C_GREEN, dp(10).toFloat())
-            setOnClickListener{ discoverPrinters() }
-        } as Button // Trick: need Button for type, create Button instead
-        // Actually recreate as Button to keep type
         val btn = Button(this).apply{
             text="選擇印表機"; textSize=14f; setTextColor(Color.WHITE)
             background=pillBg(C_GREEN, dp(10).toFloat())
