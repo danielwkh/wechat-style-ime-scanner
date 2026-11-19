@@ -906,6 +906,7 @@ class PrintEditorActivity : Activity() {
         }
         override fun onTouchEvent(e: MotionEvent): Boolean{
             val dev=canvasInfo?.invoke()?:return true; val data=try{ read?.invoke()}catch(_:Exception){null}?:return true
+            if (width > 0 && height > 0) computeLayout()
             val geo=LabelGeometry(dev,data); val toMm={ v:Float,o:Float-> (v-o)/pxPerMm }
             when(e.actionMasked){
                 MotionEvent.ACTION_DOWN->{ downX=e.x; downY=e.y; lastX=e.x; lastY=e.y; dragging=false; movedOnce=false; baseDistance=0f

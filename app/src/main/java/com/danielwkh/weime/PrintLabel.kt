@@ -99,8 +99,31 @@ class LabelGeometry(val device: LabelDevice, val data: LabelData) {
         val sc=if(st.scale<=0.01f)0.01f else st.scale; return PointF(rx/sc+cx, ry/sc+cy)
     }
     fun hitTest(styles: Map<LabelElement, ElementStyle>, xMm: Float, yMm: Float): LabelElement? {
-        for(e in LabelElement.values().reversed()){ val b=base(e); val p=toLocal(xMm,yMm,b,styles.getValue(e)); if(b.contains(p.x,p.y)) return e }
+        // 使用變換後的四邊形做點內判定，支援旋轉/縮放後的精準選取
+        for(e in LabelElement.values().reversed()){
+            val b=base(e)
+            val st = styles[e] ?: ElementStyle()
+            val pts = corners(b, st)
+            if (pointInQuad(xMm, yMm, pts)) return e
+            // 放寬 1mm 觸控容差，方便手指點選
+            val expanded = expandRect(b, 1.2f)
+            val pts2 = corners(expanded, st)
+            if (pointInQuad(xMm, yMm, pts2)) return e
+        }
         return null
+    }
+    private fun expandRect(r: RectF, extraMm: Float): RectF = RectF(r.left - extraMm, r.top - extraMm, r.right + extraMm, r.bottom + extraMm)
+    private fun pointInQuad(x: Float, y: Float, pts: Array<PointF>): Boolean {
+        // 凸四邊形 winding：點在四條邊同側即為內部
+        var sign = 0
+        for(i in pts.indices){
+            val a=pts[i]; val b=pts[(i+1)%pts.size]
+            val cross = (b.x - a.x)*(y - a.y) - (b.y - a.y)*(x - a.x)
+            val s = when { cross > 1e-6f -> 1; cross < -1e-6f -> -1; else -> 0 }
+            if(s==0) continue
+            if(sign==0) sign=s else if(sign!=s) return false
+        }
+        return true
     }
 }
 
